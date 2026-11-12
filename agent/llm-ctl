@@ -1,0 +1,530 @@
+#!/usr/bin/python3
+"""llm-ctl: ai-panel's agent on the GPU host (Proxmox, llama.cpp in an LXC container).
+
+The panel's SSH key may run this and nothing else (a forced command). It reads one verb from
+SSH_ORIGINAL_COMMAND, checks it against fixed lists from its config, runs fixed commands
+without a shell, answers one JSON object, and logs each call to syslog (tag llm-ctl).
+
+    status                         host, guests, running tasks, the LLM's units and health
+    shutdown | reboot              stop the LLM's container, then power off or reboot the host
+    llm switch <model>             start that model's unit, stopping the others
+    llm restart|stop|start         the active unit; all units; the default model's unit
+    guest <id> start|shutdown|reboot
+    probe                          read-only health: GPUs, the LLM, an optional probe command
+    hermes-checks pause|resume     a client's checks of the LLM, inside its VM
+
+Run by the unprivileged account, it checks the verb and runs itself again through sudo with
+the checked words as arguments; as root it checks them again and acts.
+
+Standard library only; runs on the host's own Python (3.11 or newer, for tomllib).
+Config: /etc/llm-ctl/config.toml (LLM_CTL_CONFIG overrides it).
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import syslog
+import tomllib
+
+CONFIG = "/etc/llm-ctl/config.toml"
+SELF = "/usr/local/sbin/llm-ctl"
+WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}$")
+EXIT_OK, EXIT_FAILED, EXIT_REFUSED = 0, 1, 2
+
+DEFAULT_COMMANDS = {
+    "pct": ["/usr/sbin/pct"],
+    "qm": ["/usr/sbin/qm"],
+    "pvesh": ["/usr/bin/pvesh"],
+    "sudo": ["/usr/bin/sudo", "-n"],
+    "nvidia_smi": ["/usr/bin/nvidia-smi"],
+    "poweroff": ["/usr/bin/systemctl", "poweroff"],
+    "reboot": ["/usr/bin/systemctl", "reboot"],
+    # These run inside the LLM's container, through `pct exec`.
+    "ct_systemctl": ["systemctl"],
+    "ct_curl": ["curl"],
+    "ct_cat": ["cat"],
+}
+
+
+class Refused(Exception):
+    """The request is not one this agent accepts."""
+
+
+class Failed(Exception):
+    """The request was accepted, and did not work."""
+
+
+class Result:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class Runner:
+    """Runs a command as an argument list, never through a shell. Tests use a fake."""
+
+    def run(self, argv, input=None, timeout=60):
+        try:
+            done = subprocess.run(
+                argv, input=input, capture_output=True, text=True, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired:
+            raise Failed("%s did not finish within %d s" % (argv[0], timeout)) from None
+        except OSError as e:
+            raise Failed("cannot run %s: %s" % (argv[0], e)) from None
+        return Result(done.returncode, done.stdout, done.stderr)
+
+
+def _words(values, what, pattern=WORD):
+    out = [str(v) for v in values]
+    for v in out:
+        if not pattern.match(v):
+            raise ValueError("%s: %r is not allowed" % (what, v))
+    return out
+
+
+def _argv(value, what):
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not value or not all(isinstance(v, str) for v in value):
+        raise ValueError("%s must be a command: a list of strings" % what)
+    return list(value)
+
+
+class Config:
+    def __init__(self, data):
+        llm = data.get("llm") or {}
+        if "ct" not in llm:
+            raise ValueError("llm.ct (the LLM's container id) is required")
+        self.ct = str(int(llm["ct"]))
+        self.url = str(llm.get("url", "http://127.0.0.1:8080")).rstrip("/")
+        self.api_key_file = llm.get("api_key_file")
+        models = llm.get("models") or {}
+        if not models:
+            raise ValueError("llm.models needs at least one model")
+        self.models = {}
+        for name, model in models.items():
+            _words([name], "model name")
+            self.models[name] = _words([model["unit"]], "unit", UNIT)[0]
+        self.default_model = llm.get("default_model", next(iter(self.models)))
+        if self.default_model not in self.models:
+            raise ValueError("llm.default_model is not one of llm.models")
+        self.health_timeout = int(llm.get("health_timeout_seconds", 5))
+
+        guests = data.get("guests") or {}
+        self.guests = [int(g) for g in guests.get("allowed", [])]
+        self.guest_timeout = int(guests.get("shutdown_timeout_seconds", 120))
+        self.llm_stop_timeout = int((data.get("shutdown") or {}).get("llm_timeout_seconds", 120))
+        self.node = str(data.get("node") or socket.gethostname().split(".")[0])
+
+        checks = data.get("hermes_checks")
+        self.checks = None
+        if checks:
+            self.checks = {
+                "vmid": str(int(checks["vmid"])),
+                "pause": _argv(checks["pause"], "hermes_checks.pause"),
+                "resume": _argv(checks["resume"], "hermes_checks.resume"),
+            }
+        probe = data.get("probe") or {}
+        self.probe_command = (
+            _argv(probe["command"], "probe.command") if "command" in probe else None
+        )
+        self.commands = dict(DEFAULT_COMMANDS)
+        for key, value in (data.get("commands") or {}).items():
+            if key not in DEFAULT_COMMANDS:
+                raise ValueError("commands.%s is not a known command" % key)
+            self.commands[key] = _argv(value, "commands." + key)
+        self.self_path = str(data.get("self", SELF))
+
+
+def load_config(path):
+    with open(path, "rb") as f:
+        return Config(tomllib.load(f))
+
+
+def parse(words, config):
+    """The checked verb as a tuple of words, or Refused."""
+    if not words:
+        raise Refused("no command given")
+    for word in words:
+        if not WORD.match(word):
+            raise Refused("refused word %r" % word[:40])
+    verb = tuple(words)
+    if verb in (("status",), ("shutdown",), ("reboot",), ("probe",)):
+        return verb
+    if len(verb) == 3 and verb[:2] == ("llm", "switch"):
+        if verb[2] not in config.models:
+            raise Refused("unknown model %r" % verb[2])
+        return verb
+    if len(verb) == 2 and verb[0] == "llm" and verb[1] in ("restart", "stop", "start"):
+        return verb
+    if len(verb) == 3 and verb[0] == "guest" and verb[2] in ("start", "shutdown", "reboot"):
+        if not verb[1].isdigit() or int(verb[1]) not in config.guests:
+            raise Refused("guest %s is not allowed" % verb[1])
+        return verb
+    if len(verb) == 2 and verb[0] == "hermes-checks" and verb[1] in ("pause", "resume"):
+        if config.checks is None:
+            raise Refused("hermes-checks is not configured")
+        return verb
+    raise Refused("unknown command %r" % " ".join(words)[:80])
+
+
+class Agent:
+    def __init__(self, config, runner, read_file=None):
+        self.config = config
+        self.runner = runner
+        self.read_file = read_file or _read_file
+        self.after = None  # a command to run once the answer is out (power off, reboot)
+
+    # helpers
+
+    def cmd(self, name):
+        return list(self.config.commands[name])
+
+    def run(self, argv, input=None, timeout=60, check=True):
+        result = self.runner.run(argv, input=input, timeout=timeout)
+        if check and result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip().splitlines()
+            raise Failed(
+                "%s: %s"
+                % (" ".join(argv[:4]), detail[-1] if detail else "exit %d" % result.returncode)
+            )
+        return result
+
+    def in_ct(self, name, *args, input=None, timeout=60, check=True):
+        argv = [*self.cmd("pct"), "exec", self.config.ct, "--", *self.cmd(name), *list(args)]
+        return self.run(argv, input=input, timeout=timeout, check=check)
+
+    def pvesh(self, path, *args):
+        argv = [*self.cmd("pvesh"), "get", path, *list(args), "--output-format", "json"]
+        result = self.run(argv, timeout=30)
+        try:
+            return json.loads(result.stdout or "null")
+        except ValueError:
+            raise Failed("pvesh %s: not JSON" % path) from None
+
+    def guests(self):
+        wanted = set(self.config.guests) | {int(self.config.ct)}
+        found = []
+        for kind in ("lxc", "qemu"):
+            for g in self.pvesh("/nodes/%s/%s" % (self.config.node, kind)) or []:
+                if int(g.get("vmid", 0)) in wanted:
+                    found.append(
+                        {
+                            "id": int(g["vmid"]),
+                            "name": g.get("name", ""),
+                            "type": kind,
+                            "status": g.get("status", "unknown"),
+                        }
+                    )
+        return sorted(found, key=lambda g: g["id"])
+
+    def guest_type(self, guest_id):
+        for g in self.guests():
+            if g["id"] == guest_id:
+                return g["type"]
+        raise Failed("guest %d does not exist on %s" % (guest_id, self.config.node))
+
+    def units(self):
+        """Each model's unit state inside the container: active, inactive, failed, ..."""
+        names = list(self.config.models)
+        result = self.in_ct(
+            "ct_systemctl",
+            "is-active",
+            *[self.config.models[n] for n in names],
+            timeout=20,
+            check=False,
+        )
+        lines = result.stdout.split()
+        if len(lines) != len(names):
+            return dict.fromkeys(names, "unknown")
+        return dict(zip(names, lines, strict=False))
+
+    def active_model(self, units=None):
+        units = units if units is not None else self.units()
+        return next((n for n, state in units.items() if state == "active"), None)
+
+    def http_code(self, path):
+        result = self.in_ct(
+            "ct_curl",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-m",
+            str(self.config.health_timeout),
+            self.config.url + path,
+            timeout=self.config.health_timeout + 10,
+            check=False,
+        )
+        code = result.stdout.strip()
+        return int(code) if code.isdigit() and code != "000" else None
+
+    def props(self):
+        """/props with the API key, kept off every command line: curl reads it on stdin."""
+        headers = ""
+        if self.config.api_key_file:
+            key = self.in_ct("ct_cat", self.config.api_key_file, timeout=10).stdout.strip()
+            headers = "Authorization: Bearer %s\n" % key
+        result = self.in_ct(
+            "ct_curl",
+            "-s",
+            "-m",
+            str(self.config.health_timeout),
+            "-H",
+            "@-",
+            self.config.url + "/props",
+            input=headers,
+            timeout=self.config.health_timeout + 10,
+            check=False,
+        )
+        try:
+            props = json.loads(result.stdout)
+        except ValueError:
+            return {}
+        return (
+            {k: props.get(k) for k in ("model_alias", "model_path")}
+            if isinstance(props, dict)
+            else {}
+        )
+
+    def llm_state(self):
+        try:
+            units = self.units()
+        except Failed:
+            units = dict.fromkeys(self.config.models, "unknown")
+        state = {"active_model": self.active_model(units), "units": units, "health": None}
+        try:
+            state["health"] = self.http_code("/health")
+            if state["health"] == 200:
+                state.update(self.props())
+        except Failed:
+            pass
+        return state
+
+    # verbs
+
+    def do_status(self):
+        uptime = self.read_file("/proc/uptime").split()[0]
+        return {
+            "host": {
+                "hostname": socket.gethostname(),
+                "uptime_seconds": int(float(uptime)),
+                "kernel": os.uname().release,
+                "boot_id": self.read_file("/proc/sys/kernel/random/boot_id").strip(),
+            },
+            "guests": self.guests(),
+            "tasks": [
+                {
+                    "type": t.get("type", ""),
+                    "id": t.get("id", ""),
+                    "user": t.get("user", ""),
+                    "upid": t.get("upid", ""),
+                }
+                for t in self.pvesh("/nodes/%s/tasks" % self.config.node, "--source", "active")
+                or []
+            ],
+            "llm": self.llm_state(),
+        }
+
+    def stop_llm_guest(self):
+        timeout = self.config.llm_stop_timeout
+        result = self.run(
+            [*self.cmd("pct"), "shutdown", self.config.ct, "--timeout", str(timeout)],
+            timeout=timeout + 30,
+            check=False,
+        )
+        if result.returncode != 0:
+            state = self.run([*self.cmd("pct"), "status", self.config.ct], timeout=20, check=False)
+            if "stopped" not in state.stdout:
+                raise Failed(
+                    "container %s did not stop: %s" % (self.config.ct, result.stderr.strip())
+                )
+
+    def do_shutdown(self):
+        self.stop_llm_guest()
+        self.after = self.cmd("poweroff")
+        return {"llm_guest": "stopped", "host": "powering off"}
+
+    def do_reboot(self):
+        self.stop_llm_guest()
+        self.after = self.cmd("reboot")
+        return {"llm_guest": "stopped", "host": "rebooting"}
+
+    def do_llm(self, op, model=None):
+        units = self.config.models
+        if op == "switch":
+            unit = units[model]
+            others = [u for u in units.values() if u != unit]
+            if others:
+                self.in_ct("ct_systemctl", "stop", *others, timeout=180)
+            # A unit's start limit would make a quick switch back look like a broken config.
+            self.in_ct("ct_systemctl", "reset-failed", *units.values(), timeout=20, check=False)
+            self.in_ct("ct_systemctl", "start", unit, timeout=180)
+            return {"model": model, "unit": unit}
+        if op == "stop":
+            self.in_ct("ct_systemctl", "stop", *units.values(), timeout=180)
+            return {"stopped": list(units.values())}
+        active = self.active_model()
+        if op == "restart":
+            if active is None:
+                raise Failed("no model's unit is active")
+            self.in_ct("ct_systemctl", "reset-failed", units[active], timeout=20, check=False)
+            self.in_ct("ct_systemctl", "restart", units[active], timeout=180)
+            return {"model": active, "unit": units[active]}
+        if active is not None:
+            return {"model": active, "unit": units[active], "note": "active already"}
+        unit = units[self.config.default_model]
+        self.in_ct("ct_systemctl", "reset-failed", unit, timeout=20, check=False)
+        self.in_ct("ct_systemctl", "start", unit, timeout=180)
+        return {"model": self.config.default_model, "unit": unit}
+
+    def do_guest(self, guest_id, op):
+        kind = self.guest_type(guest_id)
+        tool = self.cmd("pct" if kind == "lxc" else "qm")
+        argv = [*tool, op, str(guest_id)]
+        timeout = 120
+        if op == "shutdown":
+            timeout = self.config.guest_timeout
+            argv += ["--timeout", str(timeout)]
+        self.run(argv, timeout=timeout + 30)
+        return {"id": guest_id, "type": kind, "op": op}
+
+    def do_probe(self):
+        reply = {"llm": self.llm_state(), "gpus": []}
+        fields = ["index", "name", "temperature.gpu", "power.draw", "memory.used", "memory.total"]
+        result = self.run(
+            [
+                *self.cmd("nvidia_smi"),
+                "--query-gpu=" + ",".join(fields),
+                "--format=csv,noheader,nounits",
+            ],
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                reply["gpus"].append(
+                    dict(zip(fields, [v.strip() for v in line.split(",")], strict=False))
+                )
+        else:
+            reply["gpus_error"] = (result.stderr or result.stdout).strip()[-200:]
+        if self.config.probe_command:
+            probe = self.run(self.config.probe_command, timeout=300, check=False)
+            reply["probe"] = {
+                "exit": probe.returncode,
+                "output": (probe.stdout + probe.stderr).strip().splitlines()[-40:],
+            }
+        return reply
+
+    def do_checks(self, op):
+        checks = self.config.checks
+        argv = (
+            self.cmd("qm") + ["guest", "exec", checks["vmid"], "--timeout", "60", "--"] + checks[op]
+        )
+        result = self.run(argv, timeout=90)
+        try:
+            exitcode = int(json.loads(result.stdout).get("exitcode", 1))
+        except (ValueError, AttributeError):
+            exitcode = 1
+        if exitcode != 0:
+            raise Failed("hermes-checks %s: exit %d inside VM %s" % (op, exitcode, checks["vmid"]))
+        return {"op": op, "vmid": int(checks["vmid"])}
+
+    def act(self, verb):
+        match verb:
+            case ("status",):
+                return self.do_status()
+            case ("shutdown",):
+                return self.do_shutdown()
+            case ("reboot",):
+                return self.do_reboot()
+            case ("probe",):
+                return self.do_probe()
+            case ("llm", "switch", model):
+                return self.do_llm("switch", model)
+            case ("llm", op):
+                return self.do_llm(op)
+            case ("guest", guest_id, op):
+                return self.do_guest(int(guest_id), op)
+            case ("hermes-checks", op):
+                return self.do_checks(op)
+        raise Refused("unknown command")
+
+
+def _read_file(path):
+    with open(path) as f:
+        return f.read()
+
+
+def _log(priority, message):
+    syslog.openlog("llm-ctl", syslog.LOG_PID, syslog.LOG_DAEMON)
+    syslog.syslog(priority, message)
+
+
+def _emit(out, reply):
+    out.write(json.dumps(reply, separators=(",", ":")) + "\n")
+    out.flush()
+
+
+def main(
+    argv=None, environ=None, runner=None, out=None, log=None, euid=None, execv=None, read_file=None
+):
+    environ = os.environ if environ is None else environ
+    argv = sys.argv[1:] if argv is None else argv
+    out = out or sys.stdout
+    log = log or _log
+    euid = os.geteuid() if euid is None else euid
+    execv = execv or os.execv
+    client = (environ.get("SSH_CLIENT") or "local").split()[0]
+    original = environ.get("SSH_ORIGINAL_COMMAND")
+    words = original.split() if original is not None else list(argv)
+    shown = " ".join(words)[:120]
+
+    try:
+        config = load_config(environ.get("LLM_CTL_CONFIG", CONFIG))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log(syslog.LOG_ERR, "config: %s" % e)
+        _emit(out, {"ok": False, "error": "llm-ctl config: %s" % e})
+        return EXIT_FAILED
+    try:
+        verb = parse(words, config)
+    except Refused as e:
+        log(syslog.LOG_WARNING, "refused %r from %s: %s" % (shown, client, e))
+        _emit(out, {"ok": False, "error": str(e)})
+        return EXIT_REFUSED
+
+    if euid != 0:
+        log(syslog.LOG_INFO, "%s from %s" % (" ".join(verb), client))
+        sudo = config.commands["sudo"]
+        execv(sudo[0], [*sudo, config.self_path, *list(verb)])
+        return EXIT_FAILED  # only reached when execv is a test's fake
+
+    status_only = verb == ("status",)
+    agent = Agent(config, runner or Runner(), read_file)
+    try:
+        reply = agent.act(verb)
+    except Failed as e:
+        log(syslog.LOG_ERR, "%s failed: %s" % (" ".join(verb), e))
+        _emit(out, {"ok": False, "verb": " ".join(verb), "error": str(e)})
+        return EXIT_FAILED
+    # status runs every few seconds: logged at debug, the rest as notices
+    log(syslog.LOG_DEBUG if status_only else syslog.LOG_NOTICE, "%s: ok" % " ".join(verb))
+    _emit(out, dict({"ok": True, "verb": " ".join(verb)}, **reply))
+    if agent.after is not None:
+        # The answer is out before the host goes down and takes the SSH session with it.
+        result = agent.runner.run(agent.after, timeout=60)
+        if result.returncode != 0:
+            log(syslog.LOG_ERR, "%s failed: %s" % (" ".join(agent.after), result.stderr.strip()))
+            return EXIT_FAILED
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,52 @@
+# llm-ctl's config: /etc/llm-ctl/config.toml on the GPU host, owned by root, mode 0644.
+# Everything a verb may touch is listed here; the agent refuses anything else.
+
+# The Proxmox node's name, for pvesh. Default: the host's short name.
+# node = "gpu-host"
+
+[llm]
+ct = 210                                      # the LXC container that runs llama.cpp
+url = "http://127.0.0.1:8080"                 # llama-server, as seen from inside the container
+api_key_file = "/etc/llama/api-key"           # inside the container; read for /props, never shown
+default_model = "dense"                       # what `llm start` starts
+health_timeout_seconds = 5
+
+# One entry per model: its name (what the panel sends) and its systemd unit in the container.
+# Only one runs at a time; `llm switch` stops the others first.
+[llm.models.dense]
+unit = "llama-server"
+
+[llm.models.moe]
+unit = "llama-moe"
+
+[guests]
+allowed = [210, 211, 212]           # what `guest <id> start|shutdown|reboot` may touch
+shutdown_timeout_seconds = 120
+
+[shutdown]
+llm_timeout_seconds = 120           # `pct shutdown <ct> --timeout` before the host powers off
+
+# Optional: pause and resume a client's checks of the LLM (for example an agent's
+# health-check timers) around planned work. Run inside the VM with `qm guest exec`, as root, so
+# a user's timers are reached with systemctl's --machine=<user>@.
+[hermes_checks]
+vmid = 212
+pause = ["systemctl", "--user", "--machine=agent@", "stop", "llm-check.timer"]
+resume = ["systemctl", "--user", "--machine=agent@", "start", "llm-check.timer"]
+
+# Optional: a read-only health script whose output `probe` includes (the last 40 lines).
+# [probe]
+# command = ["/usr/local/bin/llm-probe"]
+
+# The commands it runs, if yours live elsewhere. ct_* run inside the LLM's container.
+# [commands]
+# pct = ["/usr/sbin/pct"]
+# qm = ["/usr/sbin/qm"]
+# pvesh = ["/usr/bin/pvesh"]
+# sudo = ["/usr/bin/sudo", "-n"]
+# nvidia_smi = ["/usr/bin/nvidia-smi"]
+# poweroff = ["/usr/bin/systemctl", "poweroff"]
+# reboot = ["/usr/bin/systemctl", "reboot"]
+# ct_systemctl = ["systemctl"]
+# ct_curl = ["curl"]
+# ct_cat = ["cat"]
