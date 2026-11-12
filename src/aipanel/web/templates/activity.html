@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Activity · {{ site.site.name }}{% endblock %}
+{% block main %}
+<section class="card">
+  <h2>Activity</h2>
+  <form method="get" action="/activity" class="row">
+    <label>Text <input name="q" value="{{ q }}" placeholder="shutdown"></label>
+    <label>Who <input name="actor" value="{{ actor }}" placeholder="scheduler"></label>
+    <button>Filter</button>
+  </form>
+  <div class="scroll"><table class="log">
+    <thead><tr><th>When</th><th>Who</th><th>What</th><th>Details</th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+      <tr><td><time>{{ row.ts }}</time></td><td>{{ row.actor }}</td><td>{{ row.event }}</td>
+        <td class="wrap">{% for k, v in row.items() if k not in ("ts", "actor", "event", "steps") %}<span class="kv"><b>{{ k }}</b> {{ v | tojson if v is mapping or (v is iterable and v is not string) else v }}</span> {% endfor %}
+          {% if row.steps %}<details><summary>{{ row.steps | length }} steps</summary><ol>{% for s in row.steps %}<li>{{ s }}</li>{% endfor %}</ol></details>{% endif %}</td></tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">Nothing yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endblock %}

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Cost · {{ site.site.name }}{% endblock %}
+{% block main %}
+{% set c = report.currency %}
+<section class="cards">
+  <article class="card">
+    <h2>Now</h2>
+    <p class="big">{{ report.now.per_hour | money(c, 3) }}<small>/hour</small></p>
+    <dl>
+      <dt>Power</dt><dd>{{ report.now.watts | number(0, "W") }}{% if report.now.estimated %} (standby, off){% endif %}</dd>
+      <dt>Price</dt><dd>{% if report.now.price %}{{ report.now.price.price | money(c, 3) }}/kWh {{ report.now.price.period or "" }}{% else %}–{% endif %}</dd>
+      <dt>Per day</dt><dd>{{ report.now.per_day | money(c) }} at this rate</dd>
+    </dl>
+  </article>
+  <article class="card">
+    <h2>Savings</h2>
+    <p class="big">{{ report.month.saved | money(c) }}<small> this month</small></p>
+    <dl>
+      <dt>Off</dt><dd>{{ report.month.hours_off | number(1, "h") }} this month</dd>
+      <dt>Forecast</dt><dd>{% if report.forecast_saving is not none %}{{ report.forecast_saving | money(c) }} over 30 days ({{ report.forecast_off_hours | number(0, "h") }} off){% else %}–{% endif %}{% if not settings.schedule.enabled %} if the schedule runs{% endif %}</dd>
+      <dt>Idle</dt><dd>{{ report.idle_watts | number(0, "W") }} ({{ report.idle_source }})</dd>
+      <dt>Standby</dt><dd>{{ report.standby_watts | number(0, "W") }} (setting)</dd>
+    </dl>
+  </article>
+</section>
+
+{% if report.error %}<p class="banner error">{{ report.error }}</p>{% endif %}
+
+<section class="card">
+  <h2>History</h2>
+  <table>
+    <thead><tr><th></th><th>Cost</th><th>kWh</th><th>On</th><th>Off</th><th>By period</th></tr></thead>
+    <tbody>
+    {% for label, t in [("Today", report.today), ("7 days", report.week), ("This month", report.month)] %}
+      <tr><th>{{ label }}</th><td>{{ t.cost | money(c) }}</td><td>{{ t.kwh | number(1) }}</td><td>{{ t.hours_on | number(1, "h") }}</td><td>{{ t.hours_off | number(1, "h") }}</td>
+        <td>{% for period, cost in t.by_period | dictsort %}{{ period }} {{ cost | money(c) }}{% if not loop.last %} · {% endif %}{% endfor %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">Watts × price over 5-minute steps; a step without a power reading counts as off. Savings: the hours off at idle minus standby watts, at each step's price.
+    {% if report.estimated_future %}Future prices are not known: the forecast uses the same hour one week earlier.{% endif %}
+    Computed {{ local(report.computed_at, "%H:%M") }}.</p>
+</section>
+{% endblock %}

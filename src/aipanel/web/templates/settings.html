@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Settings · {{ site.site.name }}{% endblock %}
+{% block main %}
+<form method="post" action="/settings" class="settings">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p class="hint">These are the panel's own settings (settings.json). Where it connects and what it may do is in the site config, which only git changes. The schedule's rules are on the <a href="/schedule">Schedule</a> page.</p>
+  {% for section in sections %}
+  <fieldset class="card">
+    <legend>{{ section.title }}</legend>
+    {% for f in section.fields %}
+    <div class="field">
+      {% if f.kind == "bool" %}
+      <label><input type="checkbox" name="{{ f.name }}"{% if f.value %} checked{% endif %}> {{ f.label }}</label>
+      {% elif f.kind == "choice" %}
+      <label>{{ f.label }}
+        <select name="{{ f.name }}">{% for c in f.choices %}<option{% if c == f.value %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+      </label>
+      {% else %}
+      <label>{{ f.label }}
+        <input name="{{ f.name }}" value="{{ '' if f.value is none else f.value }}"
+          {% if f.kind in ("int", "float") %}type="number" inputmode="decimal" step="{{ '1' if f.kind == 'int' else 'any' }}"{% if f.minimum is not none %} min="{{ f.minimum }}"{% endif %}{% if f.maximum is not none %} max="{{ f.maximum }}"{% endif %}{% endif %}
+          {% if not f.optional %}required{% endif %}>
+      </label>
+      {% endif %}
+      {% if f.help %}<p class="hint">{{ f.help }}{% if f.minimum is not none %} ({{ f.minimum | number }}–{{ f.maximum | number }}){% endif %}</p>{% endif %}
+    </div>
+    {% endfor %}
+  </fieldset>
+  {% endfor %}
+  <button {% if not panel.store.writable %}disabled{% endif %}>Save</button>
+</form>
+
+<section class="card">
+  <h2>Export and import</h2>
+  <p><a href="/settings/export" hx-boost="false" download>Download the settings as YAML</a>, for a snapshot in git or a restore.</p>
+  <form method="post" action="/settings/import" class="stack" hx-confirm="Replace every setting with this YAML?">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>YAML to import (replaces every setting; what it leaves out returns to its default)
+      <textarea name="yaml" rows="6" spellcheck="false" required></textarea>
+    </label>
+    <button {% if not panel.store.writable %}disabled{% endif %}>Import</button>
+  </form>
+  <p class="hint">From a shell beside the panel: <code>aipanel settings get</code>, <code>aipanel settings set schedule.enabled=true</code>, <code>aipanel settings export</code>, <code>aipanel settings import file.yaml</code>.</p>
+</section>
+{% endblock %}

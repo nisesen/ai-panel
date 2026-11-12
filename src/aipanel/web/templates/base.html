@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"{% if settings.display.theme != "auto" %} data-theme="{{ settings.display.theme }}"{% endif %}>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false, "historyCacheSize": 0}'>
+  <title>{% block title %}{{ site.site.name }}{% endblock %} · ai-panel</title>
+  <link rel="stylesheet" href="/static/style.css?v={{ version }}">
+  <script src="/static/htmx.min.js?v=2.0.11" defer></script>
+</head>
+<body hx-boost="true">
+  <header class="top">
+    <a class="brand" href="/">{{ site.site.name }}</a>
+    <nav>
+      {% for key, label, href in [("dashboard", "Dashboard", "/"), ("schedule", "Schedule", "/schedule"), ("cost", "Cost", "/cost"), ("activity", "Activity", "/activity"), ("settings", "Settings", "/settings")] %}
+      <a href="{{ href }}"{% if page == key %} aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <span class="who" title="{{ user.groups | join(', ') }}">{{ user.name }}</span>
+  </header>
+  {% for kind, text in banners %}<div class="banner {{ kind }}">{{ text }}</div>{% endfor %}
+  {% if flash %}<div class="flash {{ flash[0] }}" role="status">{{ flash[1] }}</div>{% endif %}
+  <main>{% block main %}{% endblock %}</main>
+  <footer>
+    {% for link in site.site.links %}<a href="{{ link.url }}" rel="noopener">{{ link.label }}</a>{% endfor %}
+    <span>ai-panel {{ version }}</span>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Schedule · {{ site.site.name }}{% endblock %}
+{% block main %}
+{% set sched = settings.schedule %}
+<section class="card">
+  <h2>Schedule <span class="pill {{ 'ok' if sched.enabled else '' }}">{{ "on" if sched.enabled else "off" }}</span></h2>
+  <p class="hint">The host is powered off at each rule's off time and on at its on time (site time, {{ site.site.timezone }}). Only the boundaries act: powering the host on by hand inside an off window holds until the next boundary.</p>
+  <form method="post" action="/schedule/enabled" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="enabled" value="{{ 'false' if sched.enabled else 'true' }}">
+    <button>{{ "Turn the schedule off" if sched.enabled else "Turn the schedule on" }}</button>
+  </form>
+  {% if state.pending %}<p class="banner warn">Waiting for the host to be idle ({{ state.pending.reason }}); next try {{ local(state.pending.next) }}.</p>{% endif %}
+  {% if state.last %}<p class="muted">Last boundary: {{ state.last.rule }} {{ state.last.kind }} at {{ local(state.last.at) }}: {{ state.last.result }}</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Next 7 days</h2>
+  <div class="timeline" role="img" aria-label="Off windows of the next seven days">
+    <div class="hours"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>
+    {% for day in days %}
+    <div class="day"><span class="label">{{ day.label }}</span>
+      <svg class="bar" viewBox="0 0 100 10" preserveAspectRatio="none">
+        {% for b in day.protected %}<rect class="protected" x="{{ b.left }}" width="{{ b.width }}" y="0" height="10"><title>{{ b.title }}</title></rect>{% endfor %}
+        {% for b in day.off %}<rect class="off" x="{{ b.left }}" width="{{ b.width }}" y="2" height="6"><title>{{ b.title }}</title></rect>{% endfor %}
+      </svg>
+    </div>
+    {% endfor %}
+    <p class="legend"><span class="key off"></span> off <span class="key protected"></span> protected</p>
+  </div>
+  <table>
+    <thead><tr><th>When</th><th>Rule</th><th>Event</th><th></th></tr></thead>
+    <tbody>
+    {% for b, note in upcoming %}
+      <tr{% if note %} class="muted"{% endif %}><td>{{ local(b.at) }}</td><td>{{ b.rule }}</td><td>power {{ b.kind }}{% if note %} ({{ note }}){% endif %}</td>
+        <td>{% if note in ("", "skipped") %}
+          <form method="post" action="/schedule/skip" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="boundary" value="{{ b.id }}">
+            {% if note == "skipped" %}<input type="hidden" name="undo" value="1"><button class="small">Unskip</button>{% else %}<button class="small">Skip</button>{% endif %}
+          </form>{% endif %}</td></tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">No events: add a rule below.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Rules</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Days</th><th>Off → on</th><th></th></tr></thead>
+    <tbody>
+    {% for r in sched.rules %}
+      <tr{% if not r.enabled %} class="muted"{% endif %}><td>{{ r.name }}</td><td>{{ r.days | join(", ") }}</td><td>{{ r.off }} → {{ r.on }}</td>
+        <td class="buttons">
+          <form method="post" action="/schedule/rules/{{ r.name | urlencode }}/toggle" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="small">{{ "Disable" if r.enabled else "Enable" }}</button></form>
+          <form method="post" action="/schedule/rules/{{ r.name | urlencode }}/delete" class="inline" hx-confirm="Delete the rule {{ r.name }}?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="small">Delete</button></form>
+        </td></tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">No rules.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/schedule/rules" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <h3>Add a rule</h3>
+    <label>Name <input name="name" required maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9 ._\-]*" placeholder="weeknights"></label>
+    <fieldset class="days"><legend>Days the off time falls on</legend>
+      {% for d in weekdays %}<label><input type="checkbox" name="days" value="{{ d }}"{% if loop.index <= 5 %} checked{% endif %}> {{ d }}</label>{% endfor %}
+    </fieldset>
+    <div class="row">
+      <label>Off at <input type="time" name="off" value="23:00" required></label>
+      <label>On at <input type="time" name="on" value="07:00" required></label>
+    </div>
+    <p class="hint">An on time before the off time is the next day. A rule may not overlap a protected window.</p>
+    <button>Add rule</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Holds</h2>
+  <p>
+    {% if state.hold_on_until %}Held <b>on</b> until {{ local(state.hold_on_until) }}: off times are skipped.
+    {% elif state.hold_off_until %}Held <b>off</b> until {{ local(state.hold_off_until) }}: on times are skipped.
+    {% else %}None.{% endif %}
+  </p>
+  <form method="post" action="/schedule/hold" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <select name="kind" aria-label="Hold"><option value="on">Hold on</option><option value="off">Hold off</option></select>
+    <label>until <input type="datetime-local" name="until" required></label>
+    <button>Hold</button>
+  </form>
+  {% if state.hold_on_until or state.hold_off_until %}
+  <form method="post" action="/schedule/holds/clear" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="small">Clear holds</button></form>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Protected windows</h2>
+  <p class="hint">From the site config (git). No stop, scheduled or by hand, inside these.</p>
+  <ul>
+  {% for w in site.protected_windows %}<li>{{ w.days | join(", ") }} {{ w.start }}–{{ w.end }}: {{ w.reason }}</li>{% else %}<li class="muted">None.</li>{% endfor %}
+  </ul>
+</section>
+{% endblock %}

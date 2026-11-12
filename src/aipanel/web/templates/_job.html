@@ -1,0 +1,15 @@
+<section id="job" class="card job" hx-get="/fragments/job" hx-trigger="every {{ 2 if running else settings.display.refresh_seconds }}s" hx-swap="outerHTML">
+  {% if job %}
+  <h2>{{ job.label }}
+    <span class="pill {{ 'run' if job.running else ('ok' if job.status == 'succeeded' else 'bad') }}">{{ job.status | replace("_", " ") }}</span>
+    {% if job.dry_run %}<span class="pill warn">dry-run</span>{% endif %}
+  </h2>
+  <p class="muted">by {{ job.actor }}, {{ local(job.started_at) }}{% if job.params %} · {% for k, v in job.params.items() %}{{ k }}={{ v }} {% endfor %}{% endif %}</p>
+  <ol class="steps">
+    {% for step in job.steps %}<li><time>{{ local(step.at, "%H:%M:%S") }}</time> {{ step.message }}</li>{% endfor %}
+  </ol>
+  {% else %}
+  <h2>Actions</h2>
+  <p class="muted">Nothing has run since the panel started.</p>
+  {% endif %}
+</section>

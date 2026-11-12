@@ -1,0 +1,84 @@
+{% set host = snap.host %}
+<section id="status" class="cards" hx-get="/fragments/status" hx-trigger="every {{ settings.display.refresh_seconds }}s" hx-swap="outerHTML">
+  <article class="card">
+    <h2>Host</h2>
+    <p class="big"><span class="pill {{ snap.power }}">{{ "power " ~ snap.power }}</span>
+      {% if host %}<span class="pill ok">answers</span>{% elif snap.power != "off" %}<span class="pill bad">no answer</span>{% endif %}</p>
+    <dl>
+      {% if host %}
+      <dt>Up</dt><dd>{{ host.uptime_seconds | duration }}</dd>
+      <dt>Kernel</dt><dd>{{ host.kernel or "–" }}</dd>
+      <dt>Tasks</dt><dd>{{ host.tasks | join(", ") if host.tasks else "none" }}</dd>
+      {% endif %}
+      <dt>BMC read</dt><dd>{{ local(snap.power_at, "%H:%M:%S") }}</dd>
+    </dl>
+  </article>
+
+  <article class="card">
+    <h2>LLM</h2>
+    {% set model = site.model(snap.llm.model) if snap.llm.model else None %}
+    <p class="big">
+      {% if snap.llm.healthy %}<span class="pill ok">healthy</span>{% elif snap.llm.healthy == false %}<span class="pill bad">not healthy</span>{% else %}<span class="pill">unknown</span>{% endif %}
+      {{ model.label if model else (snap.llm.alias or "") }}
+    </p>
+    <dl>
+      <dt>Busy</dt><dd>{% if snap.llm.slots %}{{ snap.llm.busy }} of {{ snap.llm.slots }} slots{% else %}–{% endif %}</dd>
+      <dt>Decode</dt><dd>{{ snap.llm.decode_tps | number(1, "tok/s") }}</dd>
+      {% if snap.llm.path %}<dt>File</dt><dd class="wrap">{{ snap.llm.path }}</dd>{% endif %}
+    </dl>
+  </article>
+
+  <article class="card">
+    <h2>GPUs</h2>
+    {% if snap.gpus %}
+    <table class="compact">
+      <thead><tr><th>#</th><th>°C</th><th>W</th><th>VRAM GiB</th></tr></thead>
+      <tbody>
+      {% for g in snap.gpus %}
+        <tr><td>{{ g.index }}</td><td>{{ g.temperature | number }}</td><td>{{ g.power | number }}</td><td>{{ g.memory_used | gib }} / {{ g.memory_total | gib }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">No readings.</p>{% endif %}
+  </article>
+
+  <article class="card">
+    <h2>Guests</h2>
+    <table class="compact">
+      <tbody>
+      {% for g in site.host.guests %}
+        {% set state = host.guest(g.id) if host else None %}
+        <tr><td>{{ g.id }}</td><td>{{ g.name }}</td><td><span class="pill {{ 'ok' if state and state.status == 'running' else '' }}">{{ state.status if state else "–" }}</span></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article class="card">
+    <h2>Panel</h2>
+    <dl>
+      <dt>Schedule</dt>
+      <dd>{% if not schedule.enabled %}off{% elif next_event %}{{ next_event[0].kind }} {{ local(next_event[0].at) }}{% if next_event[1] %} ({{ next_event[1] }}){% endif %}{% else %}no events{% endif %}</dd>
+      <dt>Silences</dt>
+      <dd>{% if snap.silences %}{{ snap.silences | length }}, until {{ local(snap.silences[0].ends_at) }}{% else %}none{% endif %}</dd>
+      <dt>Power</dt><dd>{{ cost_now.watts | number(0, "W") }}{% if cost_now.estimated %} (standby){% endif %}</dd>
+      <dt>Price</dt><dd>{% if cost_now.price %}{{ cost_now.price.price | money(snap.energy.currency, 3) }}/kWh {{ cost_now.price.period or "" }}{% else %}–{% endif %}</dd>
+      <dt>Cost</dt><dd>{{ cost_now.per_hour | money(snap.energy.currency, 3) }}/h · {{ cost_now.per_day | money(snap.energy.currency) }}/day</dd>
+    </dl>
+    {% if schedule.enabled and next_event and not next_event[1] %}
+    <form method="post" action="/schedule/skip" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="boundary" value="{{ next_event[0].id }}">
+      <input type="hidden" name="next" value="/">
+      <button class="small">Skip it</button>
+    </form>
+    {% endif %}
+  </article>
+
+  {% if snap.errors %}
+  <article class="card wide errors">
+    <h2>Not answering</h2>
+    <ul>{% for name, error in snap.errors.items() %}<li><b>{{ name }}</b>: {{ error }}</li>{% endfor %}</ul>
+  </article>
+  {% endif %}
+</section>
