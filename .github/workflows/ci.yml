@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A read-only token: nothing here publishes anything (release.yml does, for version tags).
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Actions are pinned to a commit, with the release noted beside it.
+jobs:
+  checks:
+    name: Lint, types, tests, schemas
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - run: uv sync --locked
+      - name: ruff
+        run: |
+          uv run ruff check --output-format github .
+          uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest
+      # The host agent runs on the host's own Python: test it on the oldest supported and on
+      # Debian 13's.
+      - name: llm-ctl on Python 3.11 and 3.13
+        run: |
+          for v in 3.11 3.13; do
+            uv run --python "$v" --no-project --with pytest -- python -m pytest agent/tests -q
+          done
+      - name: The schemas are current
+        run: uv run aipanel schema --out schema --check
+      - name: The example config is valid
+        run: uv run aipanel validate examples/config.yaml
+
+  secrets:
+    name: Secret scan (whole history)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: gitleaks 8.30.1
+        run: |
+          curl -fsSLo gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --redact --verbose .
+
+  image:
+    name: Image builds and runs (DEMO, read-only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build -t ai-panel:ci .
+      - name: Non-root, with ipmitool and ssh
+        run: |
+          test "$(docker inspect --format '{{.Config.User}}' ai-panel:ci)" = "10001:10001"
+          docker run --rm --entrypoint ipmitool ai-panel:ci -V
+          docker run --rm --entrypoint ssh ai-panel:ci -V
+          docker run --rm -v "$PWD/examples:/examples:ro" ai-panel:ci validate /examples/config.yaml
+      - name: DEMO mode comes up healthy on a read-only root file system
+        run: |
+          docker run -d --name demo --read-only --tmpfs /tmp -v state:/var/lib/aipanel \
+            -e AIPANEL_DEMO=1 -p 8080:8080 -p 9090:9090 ai-panel:ci
+          for i in $(seq 1 30); do
+            [ "$(docker inspect --format '{{.State.Health.Status}}' demo)" = healthy ] && break
+            sleep 2
+          done
+          docker inspect --format '{{.State.Health.Status}}' demo | grep -qx healthy
+          curl -fsS http://127.0.0.1:8080/ | grep -q "DEMO mode"
+          curl -fsS http://127.0.0.1:8080/api/status | python3 -c 'import json, sys; s = json.load(sys.stdin); assert s["demo"] and s["snapshot"]["power"] == "on", s'
+          curl -fsS http://127.0.0.1:9090/metrics | grep -q '^aipanel_state_writable 1.0$'
+      - if: failure()
+        run: docker logs demo || true
