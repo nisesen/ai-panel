@@ -6,6 +6,11 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The release's smoke test runs one platform at a time (Docker refused the second one under the
+  same index digest, so v0.1.1's release run failed after publishing; the image itself is fine).
+
 ## [0.1.1] - 2026-11-12
 
 Fixes from a review of 0.1.0. **Check your configs:** `auth.trusted_proxies` is now required,
