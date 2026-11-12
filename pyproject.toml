@@ -1,0 +1,75 @@
+[project]
+name = "ai-panel"
+version = "0.1.0"
+description = "A small web control panel for a self-hosted GPU/LLM server: power on and off via IPMI, graceful shutdown, model switching, schedules and running cost."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+dependencies = [
+  "fastapi>=0.120",
+  "uvicorn>=0.38",
+  "jinja2>=3.1.6",
+  "pydantic>=2.12",
+  "pyyaml>=6.0.3",
+  "httpx>=0.28.1",
+  "python-multipart>=0.0.20",
+]
+
+[project.scripts]
+aipanel = "aipanel.cli:main"
+
+[project.urls]
+Source = "https://github.com/nisesen/ai-panel"
+
+[dependency-groups]
+dev = [
+  "pytest>=9",
+  "ruff>=0.14",
+  "mypy>=1.18",
+  "types-pyyaml>=6.0.12",
+]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "aipanel"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+# The host agent is one file without an extension, and runs on the host's own Python.
+extend-include = ["agent/llm-ctl"]
+per-file-target-version = { "agent/**" = "py311" }
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "C4", "PIE", "SIM", "RUF", "S", "ASYNC"]
+ignore = [
+  "S603",    # subprocess without a shell is exactly how commands are run here
+  "S607",    # tool names come from the configuration on purpose
+  "SIM105",  # try/except/pass reads more plainly than contextlib.suppress
+  "S101",    # asserts state invariants for the type checker
+  "ASYNC109",  # a timeout parameter is how the backends are told their limit
+  "RUF001", "RUF002", "RUF003",  # typographic characters in text people read are deliberate
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108"]
+"agent/tests/**" = ["S101", "S105", "S108"]
+"agent/llm-ctl" = ["UP"]  # keep it readable on the host's older Python
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src/aipanel"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "agent/tests"]
+addopts = "-p no:cacheprovider"

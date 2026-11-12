@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+
+# Runtime state of a local run, and site configs that are not examples
+state/
+/config.yaml
+settings.json
+
+# macOS
+.DS_Store
