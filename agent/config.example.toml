@@ -1,8 +1,17 @@
-# llm-ctl's config: /etc/llm-ctl/config.toml on the GPU host, owned by root, mode 0644.
-# Everything a verb may touch is listed here; the agent refuses anything else.
+# llm-ctl's config: /etc/llm-ctl/config.toml on the GPU host. Root must own it and its folder,
+# and nobody else may write either (mode 0644, folder 0755): llm-ctl refuses it otherwise.
+# Everything a verb may touch is listed here; the agent refuses anything else. Every command
+# is an absolute path.
 
 # The Proxmox node's name, for pvesh. Default: the host's short name.
 # node = "gpu-host"
+
+# Each changing verb finishes within this many seconds. The panel's timeouts.command_seconds
+# (default 300) must be longer. status has 20 s, probe 120 s.
+limit_seconds = 240
+
+# One changing verb at a time: a second one answers "busy".
+# lock_file = "/run/llm-ctl.lock"
 
 [llm]
 ct = 210                                      # the LXC container that runs llama.cpp
@@ -12,7 +21,7 @@ default_model = "dense"                       # what `llm start` starts
 health_timeout_seconds = 5
 
 # One entry per model: its name (what the panel sends) and its systemd unit in the container.
-# Only one runs at a time; `llm switch` stops the others first.
+# Only one runs at a time; `llm switch` stops the others first, and checks afterwards.
 [llm.models.dense]
 unit = "llama-server"
 
@@ -21,24 +30,31 @@ unit = "llama-moe"
 
 [guests]
 allowed = [210, 211, 212]           # what `guest <id> start|shutdown|reboot` may touch
-shutdown_timeout_seconds = 120
+shutdown_timeout_seconds = 120      # also for a guest reboot
 
 [shutdown]
 llm_timeout_seconds = 120           # `pct shutdown <ct> --timeout` before the host powers off
+min_uptime_minutes = 10             # no shutdown or reboot sooner after a boot (no reboot loops)
 
 # Optional: pause and resume a client's checks of the LLM (user timers in a guest VM) around
 # planned LLM stops, so a planned switch or restart does not page anyone. Run inside the VM
-# with `qm guest exec`, as root, so a user's timers are reached with systemctl's --machine=<user>@.
+# with `qm guest exec`, as root, so a user's timers are reached with systemctl's
+# --machine=<user>@ (systemd 248 or newer, with lingering on for that user). A pause also
+# schedules its own end (systemd-run in the VM) after auto_resume_minutes, so a resume that
+# never comes cannot leave the checks off; 0 turns that off.
 [client_checks]
 vmid = 212
-pause = ["systemctl", "--user", "--machine=agent@", "stop", "llm-check.timer"]
-resume = ["systemctl", "--user", "--machine=agent@", "start", "llm-check.timer"]
+pause = ["/usr/bin/systemctl", "--user", "--machine=agent@", "stop", "llm-check.timer"]
+resume = ["/usr/bin/systemctl", "--user", "--machine=agent@", "start", "llm-check.timer"]
+auto_resume_minutes = 60
 
 # Optional: a read-only health script whose output `probe` includes (the last 40 lines).
+# It must finish within 90 s.
 # [probe]
 # command = ["/usr/local/bin/llm-probe"]
 
-# The commands it runs, if yours live elsewhere. ct_* run inside the LLM's container.
+# The commands it runs, if yours live elsewhere. ct_* run inside the LLM's container, vm_*
+# inside the client's VM.
 # [commands]
 # pct = ["/usr/sbin/pct"]
 # qm = ["/usr/sbin/qm"]
@@ -47,6 +63,8 @@ resume = ["systemctl", "--user", "--machine=agent@", "start", "llm-check.timer"]
 # nvidia_smi = ["/usr/bin/nvidia-smi"]
 # poweroff = ["/usr/bin/systemctl", "poweroff"]
 # reboot = ["/usr/bin/systemctl", "reboot"]
-# ct_systemctl = ["systemctl"]
-# ct_curl = ["curl"]
-# ct_cat = ["cat"]
+# ct_systemctl = ["/usr/bin/systemctl"]
+# ct_curl = ["/usr/bin/curl"]
+# ct_cat = ["/usr/bin/cat"]
+# vm_systemctl = ["/usr/bin/systemctl"]
+# vm_systemd_run = ["/usr/bin/systemd-run"]

@@ -12,15 +12,30 @@ itself again through `sudo` with the checked words. As root it checks them once 
 commands as argument lists (never through a shell), answers one JSON object, and logs the call
 to syslog with the tag `llm-ctl`.
 
+As root it reads only `/etc/llm-ctl/config.toml`, and refuses it unless root owns the file
+and its folder and nobody else can write either; every command in it is an absolute path. Its
+children get no stdin (unless it feeds them one), a fixed environment (`PATH`, `LANG=C.UTF-8`),
+and at most 1 MB of their output is kept. Data from llama.cpp's `/props` is cut to short
+strings. The interpreter runs isolated (`python3 -I`): no `PYTHON*` variable or user folder
+changes what it loads.
+
+**One changing verb at a time:** a second one answers `busy` (a lock in `/run`). **Time
+budgets:** `status` finishes within 20 s, `probe` within 120 s, everything else within
+`limit_seconds` (default 240); a child that overruns is killed, and one that cannot be killed is
+left behind rather than waited for. **The rule:** the panel's `timeouts.command_seconds`
+(default 300) must be longer than `limit_seconds`, so the panel never gives up on a command that
+llm-ctl is still running. **No reboot loops:** `shutdown` and `reboot` refuse until the host
+has run `shutdown.min_uptime_minutes` (default 10).
+
 | Verb | Runs |
 | --- | --- |
-| `status` | `pvesh get` for the guests and the running tasks; in the LLM's container `systemctl is-active` of each model's unit and `curl` of `/health` and `/props` (the API key goes to curl on stdin, never on a command line) |
-| `shutdown`, `reboot` | `pct shutdown <ct> --timeout <n>`, then answers, then `systemctl poweroff` or `reboot` |
-| `llm switch <model>` | in the container: stop the other models' units, `reset-failed`, start the model's unit |
+| `status` | `pvesh get` for the guests and the running tasks; in the LLM's container `systemctl show` of each model's unit (its load and active state) and `curl` of `/health` and `/props` (the API key goes to curl on stdin, never on a command line) |
+| `shutdown`, `reboot` | `pct shutdown <ct> --timeout <n>`, then answers, then `systemctl poweroff` or `reboot` (also when the panel is no longer there to read the answer) |
+| `llm switch <model>` | in the container: stop the other models' units, `reset-failed`, start the model's unit, then check that it is loaded and that no other one still runs |
 | `llm restart`, `llm stop`, `llm start` | the active unit; every model's unit; the default model's unit |
-| `guest <id> start\|shutdown\|reboot` | `pct` or `qm` (by the guest's type), only for ids in `guests.allowed` |
+| `guest <id> start\|shutdown\|reboot` | `pct` or `qm` (by the guest's type, with `--timeout` for shutdown and reboot), only for ids in `guests.allowed` |
 | `probe` | `nvidia-smi --query-gpu=...`, the LLM's state, and your own probe command if configured |
-| `client-checks pause\|resume` | pause or resume a client's checks of the LLM (user timers in a guest VM) around planned LLM stops: the configured command, inside that VM, through `qm guest exec` |
+| `client-checks pause\|resume` | pause or resume a client's checks of the LLM (user timers in a guest VM) around planned LLM stops: the configured command, inside that VM, through `qm guest exec`. A pause also starts a timer in the VM (`systemd-run --on-active`) that resumes them after `auto_resume_minutes` (default 60), so a resume that never comes cannot leave them off |
 
 Anything else, an unknown model or guest, an extra word, or a character outside
 `A-Z a-z 0-9 . _ -`, is refused with `{"ok": false, "error": ...}` and exit code 2. A verb that
@@ -29,6 +44,10 @@ fails answers `ok: false` with exit code 1.
 ## Install
 
 As root on the host. Paths are suggestions; the panel only needs the account and the key.
+You need Python 3.11 or newer, `sudo` (Proxmox does not install it), and OpenSSH 8.2 or newer.
+For `client-checks` with a user's timers: systemd 248 or newer inside the VM (for
+`systemctl --user --machine=<user>@`), lingering on for that user (`loginctl enable-linger`),
+and the QEMU guest agent.
 
 1. **The agent and its config.**
 
@@ -77,6 +96,8 @@ As root on the host. Paths are suggestions; the panel only needs the account and
        PermitTunnel no
        PermitUserRC no
        GatewayPorts no
+       DisableForwarding yes
+       # MaxSessions 1      # optional: the panel needs one session at a time
    ```
 
    If your sshd has `AllowUsers` or `AllowGroups`, add `llmctl` there. Then `sshd -t` and
@@ -85,10 +106,13 @@ As root on the host. Paths are suggestions; the panel only needs the account and
 5. **sudo**, in `/etc/sudoers.d/llm-ctl` (check with `visudo -cf /etc/sudoers.d/llm-ctl`):
 
    ```
+   Defaults:llmctl env_reset, !pam_session
    llmctl ALL=(root) NOPASSWD: /usr/local/sbin/llm-ctl
    ```
 
-   `llm-ctl` checks the verb before it calls sudo and again as root.
+   `llm-ctl` checks the verb before it calls sudo and again as root. `env_reset` (the default)
+   keeps the caller's environment out; `!pam_session` keeps every status call (every few
+   seconds) from opening a PAM session and filling the journal.
 
 6. **The panel's side:** the private key and the host's public key, in `known_hosts` form
    (`ssh-keyscan -t ed25519 192.0.2.20 > known_hosts`, checked against the host's own

@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """llm-ctl: ai-panel's agent on the GPU host (Proxmox, llama.cpp in an LXC container).
 
 The panel's SSH key may run this and nothing else (a forced command). It reads one verb from
@@ -14,12 +14,15 @@ without a shell, answers one JSON object, and logs each call to syslog (tag llm-
     client-checks pause|resume     a client's checks of the LLM (user timers in a guest VM)
 
 Run by the unprivileged account, it checks the verb and runs itself again through sudo with
-the checked words as arguments; as root it checks them again and acts.
+the checked words as arguments; as root it checks them again and acts. As root it reads only
+/etc/llm-ctl/config.toml, and only when root owns it and its folder and nobody else can write
+them. One changing verb runs at a time (a lock), each within a time budget below the panel's
+wait, and shutdown and reboot wait until the host has run a while (no reboot loops).
 
 Standard library only; runs on the host's own Python (3.11 or newer, for tomllib).
-Config: /etc/llm-ctl/config.toml (LLM_CTL_CONFIG overrides it).
 """
 
+import fcntl
 import json
 import os
 import re
@@ -27,13 +30,22 @@ import socket
 import subprocess
 import sys
 import syslog
+import threading
+import time
 import tomllib
 
 CONFIG = "/etc/llm-ctl/config.toml"
 SELF = "/usr/local/sbin/llm-ctl"
+LOCK = "/run/llm-ctl.lock"
 WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}$")
 EXIT_OK, EXIT_FAILED, EXIT_REFUSED = 0, 1, 2
+OUTPUT_CAP = 1024 * 1024
+CHILD_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
+# Each verb finishes within its budget, which the panel's own wait must exceed (docs/agent.md).
+BUDGETS = {"status": 20, "probe": 120}
+DEFAULT_BUDGET = 240
+CHANGING = ("shutdown", "reboot", "llm", "guest", "client-checks")
 
 DEFAULT_COMMANDS = {
     "pct": ["/usr/sbin/pct"],
@@ -44,10 +56,14 @@ DEFAULT_COMMANDS = {
     "poweroff": ["/usr/bin/systemctl", "poweroff"],
     "reboot": ["/usr/bin/systemctl", "reboot"],
     # These run inside the LLM's container, through `pct exec`.
-    "ct_systemctl": ["systemctl"],
-    "ct_curl": ["curl"],
-    "ct_cat": ["cat"],
+    "ct_systemctl": ["/usr/bin/systemctl"],
+    "ct_curl": ["/usr/bin/curl"],
+    "ct_cat": ["/usr/bin/cat"],
+    # These run inside the client's VM, through `qm guest exec`.
+    "vm_systemctl": ["/usr/bin/systemctl"],
+    "vm_systemd_run": ["/usr/bin/systemd-run"],
 }
+RESUME_UNIT = "llm-ctl-resume-checks"
 
 
 class Refused(Exception):
@@ -65,19 +81,56 @@ class Result:
         self.stderr = stderr
 
 
+def _drain(stream, sink):
+    """Read a pipe to its end, keeping at most OUTPUT_CAP bytes."""
+    kept = bytearray()
+    for chunk in iter(lambda: stream.read(65536), b""):
+        if len(kept) < OUTPUT_CAP:
+            kept += chunk[: OUTPUT_CAP - len(kept)]
+    sink.append(bytes(kept))
+
+
 class Runner:
-    """Runs a command as an argument list, never through a shell. Tests use a fake."""
+    """Runs a command as an argument list, never through a shell, with a fixed environment
+    and no stdin unless given. Tests use a fake."""
 
     def run(self, argv, input=None, timeout=60):
         try:
-            done = subprocess.run(
-                argv, input=input, capture_output=True, text=True, timeout=timeout, check=False
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=CHILD_ENV,
             )
-        except subprocess.TimeoutExpired:
-            raise Failed("%s did not finish within %d s" % (argv[0], timeout)) from None
         except OSError as e:
             raise Failed("cannot run %s: %s" % (argv[0], e)) from None
-        return Result(done.returncode, done.stdout, done.stderr)
+        out, err = [], []
+        readers = [
+            threading.Thread(target=_drain, args=(proc.stdout, out), daemon=True),
+            threading.Thread(target=_drain, args=(proc.stderr, err), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+        if input is not None:
+            try:
+                proc.stdin.write(input.encode())
+                proc.stdin.close()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass  # unkillable (a hung disk): leave it, but do not hang with it
+            raise Failed("%s did not finish within %d s" % (argv[0], timeout)) from None
+        for reader in readers:
+            reader.join(timeout=5)
+        text = [b"".join(x).decode("utf-8", errors="replace") for x in (out, err)]
+        return Result(proc.returncode, *text)
 
 
 def _words(values, what, pattern=WORD):
@@ -93,7 +146,14 @@ def _argv(value, what):
         value = [value]
     if not isinstance(value, list) or not value or not all(isinstance(v, str) for v in value):
         raise ValueError("%s must be a command: a list of strings" % what)
+    if not value[0].startswith("/"):
+        raise ValueError("%s must start with an absolute path, not %r" % (what, value[0]))
     return list(value)
+
+
+def _short(value):
+    """A short string from untrusted JSON, or None."""
+    return value[:200] if isinstance(value, str) else None
 
 
 class Config:
@@ -119,8 +179,12 @@ class Config:
         guests = data.get("guests") or {}
         self.guests = [int(g) for g in guests.get("allowed", [])]
         self.guest_timeout = int(guests.get("shutdown_timeout_seconds", 120))
-        self.llm_stop_timeout = int((data.get("shutdown") or {}).get("llm_timeout_seconds", 120))
+        stop = data.get("shutdown") or {}
+        self.llm_stop_timeout = int(stop.get("llm_timeout_seconds", 120))
+        self.min_uptime = int(stop.get("min_uptime_minutes", 10)) * 60
+        self.budget = int(data.get("limit_seconds", DEFAULT_BUDGET))
         self.node = str(data.get("node") or socket.gethostname().split(".")[0])
+        self.lock = str(data.get("lock_file", LOCK))
 
         checks = data.get("client_checks")
         self.checks = None
@@ -129,6 +193,7 @@ class Config:
                 "vmid": str(int(checks["vmid"])),
                 "pause": _argv(checks["pause"], "client_checks.pause"),
                 "resume": _argv(checks["resume"], "client_checks.resume"),
+                "auto_resume": int(checks.get("auto_resume_minutes", 60)),
             }
         probe = data.get("probe") or {}
         self.probe_command = (
@@ -142,7 +207,18 @@ class Config:
         self.self_path = str(data.get("self", SELF))
 
 
-def load_config(path):
+def check_owner(path, owner):
+    """Root (`owner`) owns the config and its folder, and nobody else may write them: a
+    config another user could change would be a way to run anything as root."""
+    for p in (path, os.path.dirname(os.path.abspath(path))):
+        st = os.stat(p)
+        if st.st_uid != owner or st.st_mode & 0o022:
+            raise ValueError("%s must be owned by uid %d and not group/world-writable" % (p, owner))
+
+
+def load_config(path, owner=None):
+    if owner is not None:
+        check_owner(path, owner)
     with open(path, "rb") as f:
         return Config(tomllib.load(f))
 
@@ -174,11 +250,20 @@ def parse(words, config):
     raise Refused("unknown command %r" % " ".join(words)[:80])
 
 
+def _json(text):
+    try:
+        return json.loads(text or "null")
+    except (ValueError, RecursionError):
+        return None
+
+
 class Agent:
-    def __init__(self, config, runner, read_file=None):
+    def __init__(self, config, runner, read_file=None, budget=DEFAULT_BUDGET):
         self.config = config
         self.runner = runner
         self.read_file = read_file or _read_file
+        self.deadline = time.monotonic() + budget
+        self.budget = budget
         self.after = None  # a command to run once the answer is out (power off, reboot)
 
     # helpers
@@ -187,12 +272,18 @@ class Agent:
         return list(self.config.commands[name])
 
     def run(self, argv, input=None, timeout=60, check=True):
-        result = self.runner.run(argv, input=input, timeout=timeout)
+        left = self.deadline - time.monotonic()
+        if left <= 1:
+            raise Failed("took longer than its %d s budget" % self.budget)
+        result = self.runner.run(argv, input=input, timeout=min(timeout, left))
         if check and result.returncode != 0:
             detail = (result.stderr or result.stdout).strip().splitlines()
             raise Failed(
                 "%s: %s"
-                % (" ".join(argv[:4]), detail[-1] if detail else "exit %d" % result.returncode)
+                % (
+                    " ".join(argv[:4]),
+                    detail[-1][:300] if detail else "exit %d" % result.returncode,
+                )
             )
         return result
 
@@ -200,26 +291,38 @@ class Agent:
         argv = [*self.cmd("pct"), "exec", self.config.ct, "--", *self.cmd(name), *list(args)]
         return self.run(argv, input=input, timeout=timeout, check=check)
 
+    def in_vm(self, argv, check=True):
+        vm = self.config.checks["vmid"]
+        result = self.run(
+            [*self.cmd("qm"), "guest", "exec", vm, "--timeout", "60", "--", *argv],
+            timeout=90,
+            check=check,
+        )
+        reply = _json(result.stdout)
+        exitcode = int(reply.get("exitcode", 1)) if isinstance(reply, dict) else 1
+        if check and exitcode != 0:
+            raise Failed("%s: exit %d inside VM %s" % (argv[-1], exitcode, vm))
+        return exitcode
+
     def pvesh(self, path, *args):
         argv = [*self.cmd("pvesh"), "get", path, *list(args), "--output-format", "json"]
-        result = self.run(argv, timeout=30)
-        try:
-            return json.loads(result.stdout or "null")
-        except ValueError:
-            raise Failed("pvesh %s: not JSON" % path) from None
+        reply = _json(self.run(argv, timeout=15).stdout)
+        if not isinstance(reply, list):
+            raise Failed("pvesh %s: not a JSON list" % path)
+        return [x for x in reply if isinstance(x, dict)]
 
     def guests(self):
         wanted = set(self.config.guests) | {int(self.config.ct)}
         found = []
         for kind in ("lxc", "qemu"):
-            for g in self.pvesh("/nodes/%s/%s" % (self.config.node, kind)) or []:
-                if int(g.get("vmid", 0)) in wanted:
+            for g in self.pvesh("/nodes/%s/%s" % (self.config.node, kind)):
+                if str(g.get("vmid", "")).isdigit() and int(g["vmid"]) in wanted:
                     found.append(
                         {
                             "id": int(g["vmid"]),
-                            "name": g.get("name", ""),
+                            "name": _short(g.get("name")) or "",
                             "type": kind,
-                            "status": g.get("status", "unknown"),
+                            "status": _short(g.get("status")) or "unknown",
                         }
                     )
         return sorted(found, key=lambda g: g["id"])
@@ -231,23 +334,31 @@ class Agent:
         raise Failed("guest %d does not exist on %s" % (guest_id, self.config.node))
 
     def units(self):
-        """Each model's unit state inside the container: active, inactive, failed, ..."""
+        """Each model's unit inside the container: {"active": ..., "load": ...}."""
         names = list(self.config.models)
         result = self.in_ct(
             "ct_systemctl",
-            "is-active",
+            "show",
+            "--property=LoadState,ActiveState",
             *[self.config.models[n] for n in names],
-            timeout=20,
+            timeout=15,
             check=False,
         )
-        lines = result.stdout.split()
-        if len(lines) != len(names):
-            return dict.fromkeys(names, "unknown")
-        return dict(zip(names, lines, strict=False))
+        blocks = [b for b in result.stdout.strip().split("\n\n") if b.strip()]
+        if len(blocks) != len(names):
+            return {n: {"active": "unknown", "load": "unknown"} for n in names}
+        out = {}
+        for name, block in zip(names, blocks, strict=True):
+            props = dict(line.partition("=")[::2] for line in block.splitlines())
+            out[name] = {
+                "active": props.get("ActiveState", "unknown")[:30],
+                "load": props.get("LoadState", "unknown")[:30],
+            }
+        return out
 
     def active_model(self, units=None):
         units = units if units is not None else self.units()
-        return next((n for n, state in units.items() if state == "active"), None)
+        return next((n for n, u in units.items() if u["active"] == "active"), None)
 
     def http_code(self, path):
         result = self.in_ct(
@@ -260,7 +371,7 @@ class Agent:
             "-m",
             str(self.config.health_timeout),
             self.config.url + path,
-            timeout=self.config.health_timeout + 10,
+            timeout=self.config.health_timeout + 5,
             check=False,
         )
         code = result.stdout.strip()
@@ -270,7 +381,7 @@ class Agent:
         """/props with the API key, kept off every command line: curl reads it on stdin."""
         headers = ""
         if self.config.api_key_file:
-            key = self.in_ct("ct_cat", self.config.api_key_file, timeout=10).stdout.strip()
+            key = self.in_ct("ct_cat", self.config.api_key_file, timeout=5).stdout.strip()
             headers = "Authorization: Bearer %s\n" % key
         result = self.in_ct(
             "ct_curl",
@@ -281,24 +392,19 @@ class Agent:
             "@-",
             self.config.url + "/props",
             input=headers,
-            timeout=self.config.health_timeout + 10,
+            timeout=self.config.health_timeout + 5,
             check=False,
         )
-        try:
-            props = json.loads(result.stdout)
-        except ValueError:
+        props = _json(result.stdout)
+        if not isinstance(props, dict):
             return {}
-        return (
-            {k: props.get(k) for k in ("model_alias", "model_path")}
-            if isinstance(props, dict)
-            else {}
-        )
+        return {k: _short(props.get(k)) for k in ("model_alias", "model_path")}
 
     def llm_state(self):
         try:
             units = self.units()
         except Failed:
-            units = dict.fromkeys(self.config.models, "unknown")
+            units = {n: {"active": "unknown", "load": "unknown"} for n in self.config.models}
         state = {"active_model": self.active_model(units), "units": units, "health": None}
         try:
             state["health"] = self.http_code("/health")
@@ -308,32 +414,39 @@ class Agent:
             pass
         return state
 
+    def uptime(self):
+        return int(float(self.read_file("/proc/uptime").split()[0]))
+
     # verbs
 
     def do_status(self):
-        uptime = self.read_file("/proc/uptime").split()[0]
         return {
             "host": {
                 "hostname": socket.gethostname(),
-                "uptime_seconds": int(float(uptime)),
+                "uptime_seconds": self.uptime(),
                 "kernel": os.uname().release,
-                "boot_id": self.read_file("/proc/sys/kernel/random/boot_id").strip(),
+                "boot_id": self.read_file("/proc/sys/kernel/random/boot_id").strip()[:64],
             },
             "guests": self.guests(),
             "tasks": [
                 {
-                    "type": t.get("type", ""),
-                    "id": t.get("id", ""),
-                    "user": t.get("user", ""),
-                    "upid": t.get("upid", ""),
+                    "type": _short(t.get("type")) or "",
+                    "id": _short(t.get("id")) or "",
+                    "user": _short(t.get("user")) or "",
+                    "upid": _short(t.get("upid")) or "",
                 }
                 for t in self.pvesh("/nodes/%s/tasks" % self.config.node, "--source", "active")
-                or []
             ],
             "llm": self.llm_state(),
         }
 
     def stop_llm_guest(self):
+        up = self.uptime()
+        if up < self.config.min_uptime:
+            raise Failed(
+                "the host started %d min ago: it must run %d min before a shutdown or reboot "
+                "(shutdown.min_uptime_minutes)" % (up // 60, self.config.min_uptime // 60)
+            )
         timeout = self.config.llm_stop_timeout
         result = self.run(
             [*self.cmd("pct"), "shutdown", self.config.ct, "--timeout", str(timeout)],
@@ -344,7 +457,7 @@ class Agent:
             state = self.run([*self.cmd("pct"), "status", self.config.ct], timeout=20, check=False)
             if "stopped" not in state.stdout:
                 raise Failed(
-                    "container %s did not stop: %s" % (self.config.ct, result.stderr.strip())
+                    "container %s did not stop: %s" % (self.config.ct, result.stderr.strip()[:300])
                 )
 
     def do_shutdown(self):
@@ -362,36 +475,41 @@ class Agent:
         if op == "switch":
             unit = units[model]
             others = [u for u in units.values() if u != unit]
-            if others:
-                self.in_ct("ct_systemctl", "stop", *others, timeout=180)
+            if others:  # a failure here is checked below, after the start
+                self.in_ct("ct_systemctl", "stop", *others, timeout=120, check=False)
             # A unit's start limit would make a quick switch back look like a broken config.
-            self.in_ct("ct_systemctl", "reset-failed", *units.values(), timeout=20, check=False)
-            self.in_ct("ct_systemctl", "start", unit, timeout=180)
-            return {"model": model, "unit": unit}
+            self.in_ct("ct_systemctl", "reset-failed", *units.values(), timeout=15, check=False)
+            self.in_ct("ct_systemctl", "start", unit, timeout=120)
+            state = self.units()
+            if state[model]["load"] != "loaded":
+                raise Failed("unit %s is %s" % (unit, state[model]["load"]))
+            still = [n for n, u in state.items() if n != model and u["active"] == "active"]
+            if still:
+                raise Failed("still running beside %s: %s" % (model, ", ".join(still)))
+            return {"model": model, "unit": unit, "units": state}
         if op == "stop":
-            self.in_ct("ct_systemctl", "stop", *units.values(), timeout=180)
+            self.in_ct("ct_systemctl", "stop", *units.values(), timeout=120)
             return {"stopped": list(units.values())}
         active = self.active_model()
         if op == "restart":
             if active is None:
                 raise Failed("no model's unit is active")
-            self.in_ct("ct_systemctl", "reset-failed", units[active], timeout=20, check=False)
-            self.in_ct("ct_systemctl", "restart", units[active], timeout=180)
+            self.in_ct("ct_systemctl", "reset-failed", units[active], timeout=15, check=False)
+            self.in_ct("ct_systemctl", "restart", units[active], timeout=120)
             return {"model": active, "unit": units[active]}
         if active is not None:
             return {"model": active, "unit": units[active], "note": "active already"}
         unit = units[self.config.default_model]
-        self.in_ct("ct_systemctl", "reset-failed", unit, timeout=20, check=False)
-        self.in_ct("ct_systemctl", "start", unit, timeout=180)
+        self.in_ct("ct_systemctl", "reset-failed", unit, timeout=15, check=False)
+        self.in_ct("ct_systemctl", "start", unit, timeout=120)
         return {"model": self.config.default_model, "unit": unit}
 
     def do_guest(self, guest_id, op):
         kind = self.guest_type(guest_id)
         tool = self.cmd("pct" if kind == "lxc" else "qm")
         argv = [*tool, op, str(guest_id)]
-        timeout = 120
-        if op == "shutdown":
-            timeout = self.config.guest_timeout
+        timeout = self.config.guest_timeout
+        if op in ("shutdown", "reboot"):
             argv += ["--timeout", str(timeout)]
         self.run(argv, timeout=timeout + 30)
         return {"id": guest_id, "type": kind, "op": op}
@@ -399,43 +517,40 @@ class Agent:
     def do_probe(self):
         reply = {"llm": self.llm_state(), "gpus": []}
         fields = ["index", "name", "temperature.gpu", "power.draw", "memory.used", "memory.total"]
-        result = self.run(
-            [
-                *self.cmd("nvidia_smi"),
-                "--query-gpu=" + ",".join(fields),
-                "--format=csv,noheader,nounits",
-            ],
-            timeout=30,
-            check=False,
-        )
+        query = ["--query-gpu=" + ",".join(fields), "--format=csv,noheader,nounits"]
+        result = self.run([*self.cmd("nvidia_smi"), *query], timeout=30, check=False)
         if result.returncode == 0:
-            for line in result.stdout.strip().splitlines():
-                reply["gpus"].append(
-                    dict(zip(fields, [v.strip() for v in line.split(",")], strict=False))
-                )
+            for line in result.stdout.strip().splitlines()[:16]:
+                values = [v.strip()[:60] for v in line.split(",")]
+                reply["gpus"].append(dict(zip(fields, values, strict=False)))
         else:
             reply["gpus_error"] = (result.stderr or result.stdout).strip()[-200:]
         if self.config.probe_command:
-            probe = self.run(self.config.probe_command, timeout=300, check=False)
-            reply["probe"] = {
-                "exit": probe.returncode,
-                "output": (probe.stdout + probe.stderr).strip().splitlines()[-40:],
-            }
+            probe = self.run(self.config.probe_command, timeout=90, check=False)
+            lines = (probe.stdout + probe.stderr).strip().splitlines()[-40:]
+            reply["probe"] = {"exit": probe.returncode, "output": [x[:300] for x in lines]}
         return reply
 
     def do_checks(self, op):
+        """Pause or resume. A pause also schedules its own end inside the VM, so a resume the
+        panel never sends cannot leave the checks off for good."""
         checks = self.config.checks
-        argv = (
-            self.cmd("qm") + ["guest", "exec", checks["vmid"], "--timeout", "60", "--"] + checks[op]
-        )
-        result = self.run(argv, timeout=90)
-        try:
-            exitcode = int(json.loads(result.stdout).get("exitcode", 1))
-        except (ValueError, AttributeError):
-            exitcode = 1
-        if exitcode != 0:
-            raise Failed("client-checks %s: exit %d inside VM %s" % (op, exitcode, checks["vmid"]))
-        return {"op": op, "vmid": int(checks["vmid"])}
+        stop_timer = [*self.cmd("vm_systemctl"), "stop", RESUME_UNIT + ".timer"]
+        self.in_vm(stop_timer, check=False)
+        self.in_vm(checks[op])
+        reply = {"op": op, "vmid": int(checks["vmid"])}
+        minutes = checks["auto_resume"]
+        if op == "pause" and minutes > 0:
+            timer = [
+                *self.cmd("vm_systemd_run"),
+                "--on-active=%dmin" % minutes,
+                "--unit=" + RESUME_UNIT,
+                "--collect",
+                *checks["resume"],
+            ]
+            self.in_vm(timer)
+            reply["auto_resume_minutes"] = minutes
+        return reply
 
     def act(self, verb):
         match verb:
@@ -469,12 +584,40 @@ def _log(priority, message):
 
 
 def _emit(out, reply):
-    out.write(json.dumps(reply, separators=(",", ":")) + "\n")
-    out.flush()
+    """Answer. The panel may be gone already (a timeout, the host going down): that must never
+    stop what comes after, such as the power off."""
+    try:
+        out.write(json.dumps(reply, separators=(",", ":")) + "\n")
+        out.flush()
+    except OSError:
+        pass
+
+
+def _lock(path):
+    """One changing verb at a time, until it has answered and done what follows."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError as e:
+        raise Failed("cannot open the lock %s: %s" % (path, e)) from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise Failed("busy: another llm-ctl command is running") from None
+    return fd
 
 
 def main(
-    argv=None, environ=None, runner=None, out=None, log=None, euid=None, execv=None, read_file=None
+    argv=None,
+    environ=None,
+    runner=None,
+    out=None,
+    log=None,
+    euid=None,
+    execv=None,
+    read_file=None,
+    config_path=CONFIG,
+    owner=0,
 ):
     environ = os.environ if environ is None else environ
     argv = sys.argv[1:] if argv is None else argv
@@ -488,7 +631,7 @@ def main(
     shown = " ".join(words)[:120]
 
     try:
-        config = load_config(environ.get("LLM_CTL_CONFIG", CONFIG))
+        config = load_config(config_path, owner)
     except (OSError, ValueError, KeyError, TypeError) as e:
         log(syslog.LOG_ERR, "config: %s" % e)
         _emit(out, {"ok": False, "error": "llm-ctl config: %s" % e})
@@ -506,8 +649,22 @@ def main(
         execv(sudo[0], [*sudo, config.self_path, *list(verb)])
         return EXIT_FAILED  # only reached when execv is a test's fake
 
-    status_only = verb == ("status",)
-    agent = Agent(config, runner or Runner(), read_file)
+    budget = BUDGETS.get(verb[0], config.budget)
+    agent = Agent(config, runner or Runner(), read_file, budget)
+    try:
+        lock = _lock(config.lock) if verb[0] in CHANGING else None
+    except Failed as e:
+        log(syslog.LOG_WARNING, "%s refused: %s" % (" ".join(verb), e))
+        _emit(out, {"ok": False, "verb": " ".join(verb), "error": str(e)})
+        return EXIT_FAILED
+    try:
+        return _act(agent, verb, out, log)
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+
+def _act(agent, verb, out, log):
     try:
         reply = agent.act(verb)
     except Failed as e:
@@ -515,11 +672,15 @@ def main(
         _emit(out, {"ok": False, "verb": " ".join(verb), "error": str(e)})
         return EXIT_FAILED
     # status runs every few seconds: logged at debug, the rest as notices
-    log(syslog.LOG_DEBUG if status_only else syslog.LOG_NOTICE, "%s: ok" % " ".join(verb))
+    log(syslog.LOG_DEBUG if verb == ("status",) else syslog.LOG_NOTICE, "%s: ok" % " ".join(verb))
     _emit(out, dict({"ok": True, "verb": " ".join(verb)}, **reply))
     if agent.after is not None:
         # The answer is out before the host goes down and takes the SSH session with it.
-        result = agent.runner.run(agent.after, timeout=60)
+        try:
+            result = agent.runner.run(agent.after, timeout=60)
+        except Failed as e:
+            log(syslog.LOG_ERR, "%s failed: %s" % (" ".join(agent.after), e))
+            return EXIT_FAILED
         if result.returncode != 0:
             log(syslog.LOG_ERR, "%s failed: %s" % (" ".join(agent.after), result.stderr.strip()))
             return EXIT_FAILED
