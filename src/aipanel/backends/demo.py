@@ -8,10 +8,10 @@ tests drive every action into a timeout or a refusal.
 
 import itertools
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from aipanel.backends.energy import StaticPrice
+from aipanel.backends.energy import PowerLog, StaticPrice
 from aipanel.backends.protocols import (
     BackendError,
     PowerState,
@@ -415,7 +415,7 @@ class DemoMetrics:
             "demo_gpu_memory_total_bytes": "memory_total",
         }
 
-    def _on_at(self, t: float) -> bool:
+    def on_at(self, t: float) -> bool:
         if t >= self.lab.started_at.timestamp():
             state = "on"
             for when, change in self.lab.transitions:
@@ -449,7 +449,7 @@ class DemoMetrics:
             lambda t: t <= end.timestamp(), itertools.count(start.timestamp(), step)
         )
         if promql == "demo_host_power_watts":
-            points = [(t, self.lab.watts_at(t)) for t in times if self._on_at(t)]
+            points = [(t, self.lab.watts_at(t)) for t in times if self.on_at(t)]
             return [Series({}, points)]
         if promql == "demo_price_per_kwh":
             by_period: dict[str, list[tuple[float, float]]] = {}
@@ -479,3 +479,12 @@ class DemoSilences:
 
     async def expire(self, silence_id: str) -> None:
         self.silences.pop(silence_id, None)
+
+
+def seed_power_log(log: PowerLog, lab: DemoLab, days: int = 35) -> None:
+    """The demo's past: the power changes its made-up schedule would have logged."""
+    metrics = DemoMetrics(lab)
+    t, end = lab.started_at.timestamp() - days * 86400, lab.started_at.timestamp()
+    while t < end:
+        log.observe("on" if metrics.on_at(t) else "off", datetime.fromtimestamp(t, UTC))
+        t += 300

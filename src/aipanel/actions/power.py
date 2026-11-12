@@ -3,32 +3,37 @@ emergency BMC commands for a host that no longer answers or a shutdown that is s
 
 A planned stop never uses the BMC to cut power: on some hardware a BMC power cycle hard-kills
 the guests and does not clear latched faults. The BMC only switches the host on, and confirms
-that it went off.
+that it went off; and because it is the only way back on, no stop starts while it does not
+answer.
 """
 
 from datetime import datetime, timedelta
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from aipanel.actions.base import (
     Action,
     ActionContext,
     Confirm,
     Refused,
+    require_bmc_answering,
     require_host_up,
     require_idle_proxmox,
     require_outside_protected,
 )
 from aipanel.actions.registry import register
-from aipanel.backends.protocols import BackendError, PowerState, Unreachable
+from aipanel.backends.protocols import BackendError, PowerState, Timeout, Unreachable
 from aipanel.config.settings import Settings
+
+MAX_SILENCE = timedelta(days=7)
 
 
 class ShutdownParams(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     silence_minutes: int | None = Field(None, ge=0, le=10080)
-    silence_until: datetime | None = None
+    silence_until: AwareDatetime | None = None
+    until_next_on: bool = Field(False, description="Silence until the schedule's next on")
 
 
 async def power_is(ctx: ActionContext, state: PowerState) -> bool:
@@ -38,6 +43,14 @@ async def power_is(ctx: ActionContext, state: PowerState) -> bool:
 async def answers(ctx: ActionContext) -> bool:
     await ctx.host_status()  # raises while the host does not answer
     return True
+
+
+async def still_up(ctx: ActionContext) -> bool:
+    """The host is on and answers: a stop that failed left it running."""
+    try:
+        return await power_is(ctx, "on") and await answers(ctx)
+    except BackendError:
+        return False
 
 
 async def boot_id(ctx: ActionContext) -> str | None:
@@ -67,10 +80,37 @@ async def wait_until_serving(ctx: ActionContext, timeout: float) -> None:
     )
 
 
-def require_stop_allowed(ctx: ActionContext) -> None:
-    require_host_up(ctx)
-    require_idle_proxmox(ctx)
-    require_outside_protected(ctx)
+async def stop_agent(ctx: ActionContext, verb: str) -> None:
+    """Ask llm-ctl to stop or reboot the host. The host may close the connection as it goes
+    down; a timeout is different: llm-ctl did not finish, so the host's real state decides."""
+    try:
+        await ctx.agent(verb)
+    except Timeout as e:
+        if await still_up(ctx):
+            raise BackendError(
+                f"llm-ctl {verb} did not finish ({e}); the host is still up"
+            ) from None
+        ctx.log(f"llm-ctl {verb} did not answer ({e}); the host no longer does either")
+    except Unreachable as e:
+        ctx.log(f"the connection closed ({e}); checking the power")
+
+
+class Stop(Action):
+    """Shutdown and reboot: the same preconditions, and the same clean-up after a failure."""
+
+    power = True
+    confirm = Confirm.TYPED
+
+    async def check(self, ctx: ActionContext) -> None:
+        require_host_up(ctx)
+        require_idle_proxmox(ctx)
+        require_outside_protected(ctx)
+        require_bmc_answering(ctx)
+
+    async def recover(self, ctx: ActionContext) -> None:
+        if ctx.silenced and not ctx.dry_run and await still_up(ctx):
+            ctx.log("the host is still up: ending the silences of this action")
+            await ctx.unsilence(ctx.silenced)
 
 
 @register
@@ -88,45 +128,55 @@ class PowerOn(Action):
         if ctx.snapshot.power == "on":
             raise Refused("the BMC reports the host is on already")
         if ctx.snapshot.power == "unknown":
-            raise Refused("the BMC does not answer")
+            raise Refused("the BMC does not answer", retryable=True)
 
     async def run(self, ctx: ActionContext) -> None:
         boot = ctx.settings.timeouts.boot_seconds
         await ctx.do("BMC: power on", ctx.backends.power.on)
         await ctx.wait_for("the host to answer over SSH", lambda: answers(ctx), boot, 10)
         await wait_until_serving(ctx, boot)
-        await ctx.end_silences()
+        await ctx.unsilence()
 
 
 @register
-class Shutdown(Action):
+class Shutdown(Stop):
     name = "shutdown"
     label = "Shut down"
     group = "power"
-    confirm = Confirm.TYPED
-    power = True
     params = ShutdownParams
     warning = "Stops the LLM's guest, then the host with every guest on it."
 
     def limit(self, s: Settings) -> float:
         return s.timeouts.command_seconds + s.timeouts.shutdown_seconds + 120
 
-    async def check(self, ctx: ActionContext) -> None:
-        require_stop_allowed(ctx)
-
-    async def run(self, ctx: ActionContext) -> None:
+    def silence_until(self, ctx: ActionContext) -> datetime:
         params: ShutdownParams = ctx.params
         now = ctx.clock.now()
+        if params.until_next_on and ctx.next_on is not None:
+            return ctx.next_on + timedelta(minutes=ctx.settings.schedule.boot_grace_minutes)
+        if params.silence_until is not None:
+            return params.silence_until
         minutes = params.silence_minutes
         if minutes is None:
             minutes = ctx.settings.silences.shutdown_minutes
-        until = params.silence_until or now + timedelta(minutes=minutes)
-        if until > now:
+        return now + timedelta(minutes=minutes)
+
+    async def check(self, ctx: ActionContext) -> None:
+        await super().check(ctx)
+        given = ctx.params.silence_until
+        if given is not None:  # a time from the API: up to 7 days, or the schedule's next on
+            limit = ctx.clock.now() + MAX_SILENCE
+            if ctx.next_on is not None:
+                grace = timedelta(minutes=ctx.settings.schedule.boot_grace_minutes)
+                limit = max(limit, ctx.next_on + grace)
+            if given > limit:
+                raise Refused("a silence may last 7 days at most, or until the next scheduled on")
+
+    async def run(self, ctx: ActionContext) -> None:
+        until = self.silence_until(ctx)
+        if until > ctx.clock.now():
             await ctx.silence(until, "planned shutdown")
-        try:
-            await ctx.agent("shutdown")
-        except Unreachable as e:  # the host may close the connection as it goes down
-            ctx.log(f"the connection closed ({e}); checking the power")
+        await stop_agent(ctx, "shutdown")
         await ctx.wait_for(
             "the BMC to report power off",
             lambda: power_is(ctx, "off"),
@@ -136,20 +186,15 @@ class Shutdown(Action):
 
 
 @register
-class Reboot(Action):
+class Reboot(Stop):
     name = "reboot"
     label = "Reboot"
     group = "power"
-    confirm = Confirm.TYPED
-    power = True
     warning = "Restarts the host: every guest on it stops and starts again."
 
     def limit(self, s: Settings) -> float:
         t = s.timeouts
         return t.command_seconds + t.shutdown_seconds + 2 * t.boot_seconds + t.llm_ready_seconds
-
-    async def check(self, ctx: ActionContext) -> None:
-        require_stop_allowed(ctx)
 
     async def run(self, ctx: ActionContext) -> None:
         t = ctx.settings.timeouts
@@ -157,10 +202,7 @@ class Reboot(Action):
         await ctx.silence(
             ctx.clock.now() + timedelta(minutes=ctx.settings.silences.reboot_minutes), "reboot"
         )
-        try:
-            await ctx.agent("reboot")
-        except Unreachable as e:
-            ctx.log(f"the connection closed ({e}); waiting for the host")
+        await stop_agent(ctx, "reboot")
 
         async def gone() -> bool:
             return await boot_id(ctx) != before
@@ -172,7 +214,11 @@ class Reboot(Action):
         await ctx.wait_for("the host to go down", gone, t.shutdown_seconds, 5)
         await ctx.wait_for("the host to answer again", back, t.boot_seconds, 10)
         await wait_until_serving(ctx, t.boot_seconds)
-        await ctx.end_silences()
+        await ctx.unsilence(ctx.silenced)
+
+    async def recover(self, ctx: ActionContext) -> None:
+        if await boot_id(ctx) is not None:  # back up, or never down: the silences are done
+            await ctx.unsilence(ctx.silenced)
 
 
 class Emergency(Action):
@@ -195,7 +241,10 @@ class Emergency(Action):
 
     async def run(self, ctx: ActionContext) -> None:
         minutes = ctx.settings.silences.emergency_minutes
-        await ctx.silence(ctx.clock.now() + timedelta(minutes=minutes), f"emergency {self.command}")
+        try:
+            await ctx.silence(ctx.clock.now() + timedelta(minutes=minutes), self.command)
+        except Exception as e:  # an emergency does not wait for Alertmanager
+            ctx.log(f"warning: alerts not silenced ({e}); going on")
         power = ctx.backends.power
         command = {"soft": power.soft, "off": power.off, "reset": power.reset}[self.command]
         await ctx.do(f"BMC: chassis power {self.command}", command)

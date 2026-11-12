@@ -21,6 +21,10 @@ class Unreachable(BackendError):
     """A backend could not be reached at all (no answer, connection refused, timeout)."""
 
 
+class Timeout(Unreachable):
+    """A command did not finish in time: it may still be at work on the other side."""
+
+
 @dataclass(frozen=True)
 class Sensor:
     name: str

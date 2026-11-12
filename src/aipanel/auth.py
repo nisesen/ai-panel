@@ -7,16 +7,16 @@ port. A request without the user header, or without an allowed group, is refused
 `none`: no sign-in, accepted only in DEMO mode.
 
 Every change (POST, PUT, PATCH, DELETE) also needs a CSRF token: an HMAC of the user's name
-with the panel's key, sent as a form field or the X-CSRF-Token header. The key is kept in the
-state directory, so pages that are open survive a restart of the panel.
+and a 12-hour window with the panel's key, sent as a form field or the X-CSRF-Token header.
+The key is kept in the state directory, so pages that are open survive a restart of the panel.
 """
 
 import hashlib
 import hmac
 import ipaddress
 import logging
-import os
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from aipanel.files import atomic_write
 
 log = logging.getLogger("aipanel.auth")
 KEY_BYTES = 32
+CSRF_WINDOW_SECONDS = 12 * 3600
 
 CSRF_HEADER = "X-CSRF-Token"
 CSRF_FIELD = "csrf"
@@ -93,8 +94,7 @@ def load_csrf_key(path: Path) -> bytes:
         log.warning("CSRF key %s unreadable (%s): making a new one", path, e)
     key = secrets.token_bytes(KEY_BYTES)
     try:
-        atomic_write(path, key.hex() + "\n")  # mkstemp makes the file 0600
-        os.chmod(path, 0o600)
+        atomic_write(path, key.hex() + "\n", mode=0o600)
     except OSError as e:
         log.warning(
             "CSRF key not saved (%s): kept in memory, so open pages need a reload after a restart",
@@ -103,9 +103,20 @@ def load_csrf_key(path: Path) -> bytes:
     return key
 
 
-def csrf_token(key: bytes, user: User) -> str:
-    return hmac.new(key, user.name.encode(), hashlib.sha256).hexdigest()
+def csrf_token(key: bytes, user: User, now: float | None = None) -> str:
+    """A token for this user and this time window."""
+    window = int((time.time() if now is None else now) // CSRF_WINDOW_SECONDS)
+    message = f"{user.name}\n{window}".encode()
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
-def csrf_ok(key: bytes, user: User, token: str | None) -> bool:
-    return token is not None and hmac.compare_digest(csrf_token(key, user), token)
+def csrf_ok(key: bytes, user: User, token: str | None, now: float | None = None) -> bool:
+    """The token of this window or the one before: a page stays usable for 12 to 24 hours."""
+    if not token:
+        return False
+    given = token.encode("utf-8", errors="replace")
+    t = time.time() if now is None else now
+    return any(
+        hmac.compare_digest(csrf_token(key, user, t - back).encode(), given)
+        for back in (0, CSRF_WINDOW_SECONDS)
+    )

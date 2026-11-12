@@ -7,7 +7,7 @@ its steps (`run`). Steps that change something go through `ctx.do`, and waits th
 """
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
@@ -21,7 +21,9 @@ from aipanel.backends.protocols import BackendError
 from aipanel.clock import Clock
 from aipanel.config.settings import Settings
 from aipanel.config.site import ProtectedWindow, SiteConfig
-from aipanel.poller import Snapshot
+from aipanel.poller import STATUS_TIMEOUT, Snapshot
+
+BMC_FRESH = timedelta(minutes=2)
 
 
 class Confirm(StrEnum):
@@ -63,7 +65,9 @@ class ActionContext:
     log: Callable[[str], None]
     dry_run: bool = False
     force: bool = False  # the scheduler, after its grace time: busy does not stop it
-    last_failed: str | None = None  # the last action, if it failed (for the emergency actions)
+    last_failed: str | None = None  # the last power action, if it failed (emergency actions)
+    next_on: datetime | None = None  # the schedule's next power on, if it runs
+    silenced: list[str] = field(default_factory=list)  # the silences this action made
 
     async def do[T](self, what: str, step: Callable[[], Awaitable[T]]) -> T | None:
         """A step that changes something."""
@@ -105,31 +109,34 @@ class ActionContext:
         return reply or {}
 
     async def host_status(self) -> dict[str, Any]:
-        timeout = min(30, self.settings.timeouts.command_seconds)
-        return await self.backends.agent.call(["status"], timeout)
+        return await self.backends.agent.call(["status"], STATUS_TIMEOUT)
 
-    async def silence(self, until: datetime, why: str) -> list[str]:
+    async def silence(self, until: datetime, why: str) -> None:
         """One silence per matcher set of the site config, all ending at `until`."""
         if self.backends.silences is None or self.site.alertmanager is None:
             self.log("no Alertmanager configured: nothing silenced")
-            return []
+            return
         silences = self.backends.silences
         comment = f"ai-panel: {why} (by {self.actor})"
-        local = until.astimezone(self.site.site.tz).strftime("%a %H:%M")
+        local = until.astimezone(self.site.site.tz).strftime("%a %d %b %Y %H:%M %Z")
         sets = len(self.site.alertmanager.silences)
         ids = await self.do(
             f"silence alerts until {local} ({sets} silence{'s' if sets > 1 else ''})",
             lambda: silences.create(until, comment),
         )
-        return ids or []
+        self.silenced += ids or []
 
-    async def end_silences(self) -> None:
-        """Expire every silence the panel made (its createdBy), and only those."""
-        if self.backends.silences is None:
-            return
+    async def unsilence(self, ids: list[str] | None = None) -> None:
+        """Expire the given silences, or every one the panel made (its createdBy), and only
+        those. A failure here is a warning: it never fails an action that did its work."""
         silences = self.backends.silences
-        for silence in await silences.active():
-            await self.do(f"end silence {silence.id}", partial(silences.expire, silence.id))
+        if silences is None:
+            return
+        try:
+            for silence_id in ids if ids is not None else [s.id for s in await silences.active()]:
+                await self.do(f"end silence {silence_id}", partial(silences.expire, silence_id))
+        except Exception as e:
+            self.log(f"warning: silences not ended ({e}); they end at their set time")
 
 
 class Action:
@@ -157,6 +164,9 @@ class Action:
     async def run(self, ctx: ActionContext) -> None:
         raise NotImplementedError
 
+    async def recover(self, ctx: ActionContext) -> None:
+        """After `run` failed or timed out: undo what should not outlast the failure."""
+
 
 # Preconditions several actions share
 
@@ -165,7 +175,18 @@ def require_host_up(ctx: ActionContext) -> None:
     if ctx.snapshot.power == "off":
         raise Refused("the host is off")
     if ctx.snapshot.host is None:
-        raise Refused("the host does not answer over SSH")
+        raise Refused("the host does not answer over SSH", retryable=True)
+
+
+def require_bmc_answering(ctx: ActionContext) -> None:
+    """The BMC is the only way to switch the host on again: no stop without it."""
+    at = ctx.snapshot.power_at
+    if ctx.snapshot.power != "on" or at is None or ctx.clock.now() - at > BMC_FRESH:
+        raise Refused(
+            "the BMC has not answered in the last 2 minutes: without it the host could not be "
+            "switched on again",
+            retryable=True,
+        )
 
 
 def require_idle_proxmox(ctx: ActionContext) -> None:

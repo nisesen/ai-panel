@@ -107,7 +107,7 @@
         },
         "groups_separator": {
           "default": ",",
-          "description": "Authentik uses '|'",
+          "description": "Between groups in the groups header (Authentik uses '|'); a group whose name contains it cannot be matched",
           "minLength": 1,
           "title": "Groups Separator",
           "type": "string"
@@ -121,7 +121,7 @@
           "type": "array"
         },
         "trusted_proxies": {
-          "description": "Optional: addresses or CIDRs the headers may come from; others are refused",
+          "description": "Addresses or CIDRs of the proxy that sets the headers; others are refused. Required with trusted_header; ['0.0.0.0/0', '::/0'] accepts anyone (dangerous)",
           "items": {
             "type": "string"
           },
@@ -584,6 +584,14 @@
           "default": null,
           "description": "A query for decode speed",
           "title": "Decode Tokens Per Second"
+        },
+        "retention_days": {
+          "default": 15,
+          "description": "How far back Prometheus keeps data (cost history)",
+          "maximum": 3650,
+          "minimum": 1,
+          "title": "Retention Days",
+          "type": "integer"
         }
       },
       "required": [
@@ -668,6 +676,7 @@
             ],
             "type": "string"
           },
+          "maxItems": 7,
           "minItems": 1,
           "title": "Days",
           "type": "array"
@@ -882,6 +891,7 @@
             ],
             "type": "string"
           },
+          "maxItems": 7,
           "minItems": 1,
           "title": "Days",
           "type": "array"

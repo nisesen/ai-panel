@@ -160,7 +160,7 @@ class WeekOfPrices:
 
 async def test_prometheus_future_prices_repeat_last_week() -> None:
     now = WED + timedelta(days=7)
-    price = PrometheusPrice(WeekOfPrices(), "q", "period", "USD", lambda: now)
+    price = PrometheusPrice(WeekOfPrices(), "q", "period", "USD", UTC_ZONE, lambda: now)
     future = await price.future(now, now + timedelta(days=9), 3600)
     in_three_days = int((now + timedelta(days=3)).timestamp())
     in_eight_days = int((now + timedelta(days=8)).timestamp())

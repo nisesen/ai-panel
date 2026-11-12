@@ -24,29 +24,45 @@ auth:
   mode: trusted_header
   user_header: X-authentik-username     # Authentik; Authelia: Remote-User
   groups_header: X-authentik-groups     # Authelia: Remote-Groups
-  groups_separator: "|"                 # Authelia: ","
+  groups_separator: "|"                 # Authentik: "|"; Authelia: ","
   allowed_groups: [admins]
+  trusted_proxies: [10.42.0.0/16]       # required: where the headers may come from
 ```
 
 - A request without the user header is refused (401), and one without an allowed group too
-  (403). `allowed_groups` may not be empty.
+  (403). `allowed_groups` may not be empty. Groups are split on `groups_separator` and trimmed,
+  so a group whose name contains the separator cannot be allowed.
 - **The headers are only as trustworthy as the path to the panel.** Anyone who can reach the
   panel's port directly can send any header they like. So:
-  - make the proxy the only way in: a network policy that admits only the proxy's pods, or a
-    listen address only the proxy reaches;
-  - make the proxy strip these headers from incoming requests and set them itself (Authentik's
-    and Authelia's forward-auth outposts do);
-  - optionally, list the proxy's addresses in `auth.trusted_proxies`: requests from anywhere
-    else are refused.
+  - **`auth.trusted_proxies` is required**: the proxy's addresses or networks; a request from
+    anywhere else is refused (403). `["0.0.0.0/0", "::/0"]` accepts anyone, and is dangerous:
+    use it only when something else (below) guarantees that only the proxy can connect.
+  - The client address is the TCP peer's. The panel's server ignores `X-Forwarded-For` and
+    similar headers, so they cannot be used to pass as the proxy.
+  - **In Kubernetes the real control is a NetworkPolicy** that admits only the proxy's pods to
+    the panel's port, because the proxy's pods change address and `trusted_proxies` is then
+    the whole pod network. [kubernetes.md](kubernetes.md#the-networkpolicy-the-real-control)
+    has an example. Elsewhere, a listen address only the proxy reaches does the same.
+  - Make the proxy strip these headers from incoming requests and set them itself (Authentik's
+    and Authelia's forward-auth outposts do).
 - `auth.mode: none` exists for DEMO mode only; the panel refuses to start with it otherwise.
+- A future option: a mode that checks a JWT signed by the identity provider (for example the
+  `X-authentik-jwt` header) instead of trusting plain headers, so that reaching the port would
+  no longer be enough. It is not built yet.
 
-Every change (POST, PUT, PATCH, DELETE) also needs a CSRF token, bound to the signed-in user
-and to the panel's key: a page from another site cannot make the browser start an action. The
-key is made on the first start and kept in the state directory (`csrf.key`, mode 0600), so
-open pages keep working after a restart; with a read-only state directory it lives in memory
-only (the panel logs a warning) and pages need a reload after a restart. Whoever can read the state
-directory could make valid tokens (they would still need to pass the sign-in), so keep it
-private to the panel.
+Every change (POST, PUT, PATCH, DELETE) also needs a CSRF token, bound to the signed-in user,
+to a 12-hour window (the current one and the one before are accepted, so a page stays usable
+for 12 to 24 hours) and to the panel's key: a page from another site cannot make the browser
+start an action. The key is made on the first start and kept in the state directory
+(`csrf.key`, mode 0600), so open pages keep working after a restart; with a read-only state
+directory it lives in memory only (the panel logs a warning) and pages need a reload after a
+restart. Whoever can read the state directory could make valid tokens (they would still need
+to pass the sign-in), so keep it private to the panel.
+
+Requests are limited too: a body over 64 KB is refused (413); the settings refuse YAML anchors
+and aliases, more than 50 schedule rules, and more than 7 days in a rule; the audit log cuts
+long values, keeps one older file when it passes 5 MB, and its readers see only its tail.
+
 Pages send a strict Content-Security-Policy (scripts and styles from the panel only; htmx is
 configured not to evaluate code), `X-Content-Type-Options: nosniff` and no-store caching.
 
@@ -61,6 +77,10 @@ configured not to evaluate code), `X-Content-Type-Options: nosniff` and no-store
 - The panel uses the BMC to switch the host **on**, to confirm that it went **off**, and, only
   in the emergency actions, to cut or reset power. A planned stop goes through the host agent:
   on some hardware a BMC power cycle hard-kills the guests and cannot clear latched faults.
+- The BMC is the only way to switch the host on again, so no shutdown or reboot starts, by hand
+  or by the schedule, unless the BMC answered in the last two minutes. A BMC that stops
+  answering shows as such until it answers again (`aipanel_backend_up{backend="bmc"} 0`,
+  `aipanel_bmc_last_success_timestamp`): alert on it.
 
 ## The LLM's API key
 

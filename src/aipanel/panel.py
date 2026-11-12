@@ -18,6 +18,7 @@ from aipanel.backends.demo import (
     DemoMetrics,
     DemoPower,
     DemoSilences,
+    seed_power_log,
 )
 from aipanel.backends.energy import (
     PowerLog,
@@ -74,10 +75,12 @@ class Panel:
         self.audit = Audit(in_state("audit.jsonl"))
         self.store = SettingsStore(state_dir / "settings.json", self.audit, lambda: self.site)
         self.metrics = PanelMetrics()
-        self.power_log = PowerLog(in_state("power.jsonl"))
+        self.power_log = PowerLog(None if demo else in_state("power.jsonl"))
         self.http = http or httpx.AsyncClient()
         self.lab = DemoLab(self.site, self.clock) if demo else None
         self.backends = self._build_backends()
+        if self.lab is not None:
+            seed_power_log(self.power_log, self.lab)
         self.poller = Poller(
             lambda: self.backends, lambda: self.site, self.store.get, self.clock, self.power_log
         )
@@ -89,11 +92,14 @@ class Panel:
             self.clock,
             self.audit,
             self.metrics,
+            in_state("runner.json"),
+            lambda now: self.scheduler.next_on(now),
         )
         self.scheduler = Scheduler(
             in_state("scheduler.json"),
             lambda: self.site,
             self.store.get,
+            lambda: self.backends,
             self.runner,
             self.poller,
             self.clock,
@@ -152,13 +158,13 @@ class Panel:
             case cfg.StaticPower(watts=watts):
                 power = StaticPower(watts, self.power_log)
             case cfg.PrometheusPower(query=query) if metrics is not None:
-                power = PrometheusPower(metrics, query)
+                power = PrometheusPower(metrics, query, self.power_log)
         match site.cost.price:
             case cfg.StaticPrice(tariff=tariff):
                 price = StaticPrice(tariff, site.site.tz, self.clock.now)
             case cfg.PrometheusPrice() as c if metrics is not None:
                 price = PrometheusPrice(
-                    metrics, c.query, c.period_label, c.currency, self.clock.now
+                    metrics, c.query, c.period_label, c.currency, site.site.tz, self.clock.now
                 )
         return power, price
 
@@ -178,13 +184,16 @@ class Panel:
         if snap.at is not None:
             m.set("aipanel_host_power_on", {"on": 1, "off": 0}.get(snap.power, -1))
             m.set("aipanel_host_reachable", 1 if snap.host is not None else 0)
+            m.set("aipanel_poll_last_timestamp", snap.at.timestamp())
             for name in BACKENDS:
                 m.set("aipanel_backend_up", 0 if name in snap.errors else 1, {"backend": name})
+        if snap.power_at is not None:
+            m.set("aipanel_bmc_last_success_timestamp", snap.power_at.timestamp())
 
     async def _watch_loop(self) -> None:
         while True:
             try:
-                self.watch()
+                await asyncio.to_thread(self.watch)  # file reads may be slow (NFS)
             except Exception:
                 log.exception("watch failed")
             await self.clock.sleep(WATCH_SECONDS)

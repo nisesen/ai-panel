@@ -23,7 +23,10 @@ auth:
   groups_header: X-authentik-groups
   groups_separator: "|"
   allowed_groups: [admins]
-  # trusted_proxies: [198.51.100.0/24]   # optional: refuse requests from anywhere else
+  # Required: the proxy's addresses; requests from anywhere else are refused. In Kubernetes the
+  # proxy's pods change address: give the pod network here, and let a NetworkPolicy admit only
+  # the proxy's pods (docs/kubernetes.md). ["0.0.0.0/0", "::/0"] accepts anyone: dangerous.
+  trusted_proxies: [198.51.100.0/24]
 
 bmc:
   host: 192.0.2.10

@@ -3,6 +3,7 @@
 Changes need the CSRF token in the X-CSRF-Token header; GET /api/session gives it.
 """
 
+import asyncio
 from datetime import datetime
 from typing import Any, Literal
 
@@ -182,10 +183,8 @@ async def get_settings(request: Request) -> Any:
 async def _apply(request: Request, body: dict[str, Any], replace: bool) -> Any:
     panel, user = panel_of(request), user_of(request)
     try:
-        if replace:
-            settings = panel.store.replace(body, user.name)
-        else:
-            settings = panel.store.update(body, user.name)
+        write = panel.store.replace if replace else panel.store.update
+        settings = await asyncio.to_thread(write, body, user.name)  # off the event loop
     except SettingsError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
     return settings.model_dump(mode="json")

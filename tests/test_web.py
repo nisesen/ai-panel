@@ -24,6 +24,7 @@ AUTH = {
     "groups_header": "X-Forwarded-Groups",
     "groups_separator": "|",
     "allowed_groups": ["admins"],
+    "trusted_proxies": ["127.0.0.1/32"],  # the test client's address
 }
 ALICE = {"X-Forwarded-User": "alice", "X-Forwarded-Groups": "users|admins"}
 

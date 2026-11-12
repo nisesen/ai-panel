@@ -8,6 +8,7 @@ file's modification time.
 import contextlib
 import fcntl
 import json
+import os
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,7 @@ from aipanel import yamlio
 from aipanel.audit import Audit
 from aipanel.config.settings import Settings, validate
 from aipanel.config.site import SiteConfig
-from aipanel.files import atomic_write
+from aipanel.files import MODE, atomic_write
 from aipanel.files import writable as dir_writable
 
 
@@ -85,7 +86,7 @@ class SettingsStore:
     def _stat(self) -> tuple[int, int] | None:
         try:
             st = self.path.stat()
-        except FileNotFoundError:
+        except OSError:  # missing, or a state directory we may not enter
             return None
         return st.st_mtime_ns, st.st_size
 
@@ -113,12 +114,12 @@ class SettingsStore:
     def _locked(self) -> Iterator[None]:
         if not self.writable:
             raise SettingsError(f"the state directory {self.path.parent} is not writable")
-        with self.path.with_suffix(".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+        fd = os.open(self.path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, MODE)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing releases the lock
 
     def update(self, changes: Mapping[str, Any], actor: str) -> Settings:
         """Apply changes (nested, or dotted keys), validated against the site config."""

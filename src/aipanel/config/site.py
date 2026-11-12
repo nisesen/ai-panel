@@ -5,6 +5,7 @@ the CLI, so a stolen browser session can never point the panel at another target
 never in it: it names an environment variable or a file for each.
 """
 
+import ipaddress
 import os
 from pathlib import Path
 from typing import Annotated, Literal
@@ -109,19 +110,40 @@ class AuthConfig(Model):
     )
     user_header: str = "Remote-User"
     groups_header: str = "Remote-Groups"
-    groups_separator: str = Field(",", min_length=1, description="Authentik uses '|'")
+    groups_separator: str = Field(
+        ",",
+        min_length=1,
+        description="Between groups in the groups header (Authentik uses '|'); a group whose "
+        "name contains it cannot be matched",
+    )
     allowed_groups: list[str] = Field(
         default_factory=list, description="A request needs one of these groups"
     )
     trusted_proxies: list[str] = Field(
         default_factory=list,
-        description="Optional: addresses or CIDRs the headers may come from; others are refused",
+        description="Addresses or CIDRs of the proxy that sets the headers; others are refused. "
+        "Required with trusted_header; ['0.0.0.0/0', '::/0'] accepts anyone (dangerous)",
     )
 
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _networks(cls, value: list[str]) -> list[str]:
+        for network in value:
+            try:
+                ipaddress.ip_network(network, strict=False)
+            except ValueError:
+                raise ValueError(f"not an address or CIDR: {network!r}") from None
+        return value
+
     @model_validator(mode="after")
-    def _groups_for_headers(self) -> AuthConfig:
+    def _headers_need_a_proxy(self) -> AuthConfig:
         if self.mode == "trusted_header" and not self.allowed_groups:
             raise ValueError("trusted_header needs at least one entry in allowed_groups")
+        if self.mode == "trusted_header" and not self.trusted_proxies:
+            raise ValueError(
+                "trusted_header needs auth.trusted_proxies: the addresses of the proxy that sets "
+                "the headers (['0.0.0.0/0', '::/0'] accepts anyone, which is dangerous)"
+            )
         return self
 
 
@@ -198,6 +220,9 @@ class PrometheusConfig(Model):
     timeout_seconds: float = Field(10, gt=0, le=60)
     gpus: GpuQueries | None = None
     decode_tokens_per_second: str | None = Field(None, description="A query for decode speed")
+    retention_days: int = Field(
+        15, ge=1, le=3650, description="How far back Prometheus keeps data (cost history)"
+    )
 
 
 class Matcher(Model):
@@ -234,7 +259,7 @@ class ActionsConfig(Model):
 
 
 class TariffWindow(Model):
-    days: list[Weekday] = Field(min_length=1)
+    days: list[Weekday] = Field(min_length=1, max_length=7)
     start: HHMM = Field(alias="from")
     end: HHMM = Field(alias="to")
     period: str
@@ -290,7 +315,7 @@ class CostConfig(Model):
 
 
 class ProtectedWindow(Model):
-    days: list[Weekday] = Field(min_length=1)
+    days: list[Weekday] = Field(min_length=1, max_length=7)
     start: HHMM = Field(alias="from")
     end: HHMM = Field(alias="to")
     reason: str

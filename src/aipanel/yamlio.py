@@ -3,6 +3,9 @@
 PyYAML follows YAML 1.1, where `on` and `off` are booleans and `23:00` is the number 1380.
 The schedule's rules have keys named `on` and `off` and times like `23:00`, so both files are
 read with only true/false as booleans and no base-60 numbers.
+
+Anchors and aliases are refused: neither file needs them, and aliases let a few hundred bytes
+expand into millions of nodes.
 """
 
 import re
@@ -15,7 +18,13 @@ INT = "tag:yaml.org,2002:int"
 
 
 class Loader(yaml.SafeLoader):
-    pass
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        event = self.peek_event()  # type: ignore[no-untyped-call]  # untyped in the stubs
+        if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None) is not None:
+            raise yaml.composer.ComposerError(
+                None, None, "anchors and aliases are not allowed", event.start_mark
+            )
+        return super().compose_node(parent, index)
 
 
 Loader.yaml_implicit_resolvers = {

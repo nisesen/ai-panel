@@ -37,8 +37,9 @@
     {% endfor %}
     </tbody>
   </table>
-  <p class="hint">Watts × price over 5-minute steps; a step without a power reading counts as off. Savings: the hours off at idle minus standby watts, at each step's price.
+  <p class="hint">Watts × price over 5-minute steps; a step without a power reading counts as off only when the panel saw the host off then; otherwise it is a gap and counts neither way. Savings: the hours off at idle minus standby watts, at each step's price.
     {% if report.estimated_future %}Future prices are not known: the forecast uses the same hour one week earlier.{% endif %}
+    {% if report.history_from %}History starts {{ local(report.history_from) }}: Prometheus keeps {{ site.prometheus.retention_days }} days.{% endif %}
     Computed {{ local(report.computed_at, "%H:%M") }}.</p>
 </section>
 {% endblock %}

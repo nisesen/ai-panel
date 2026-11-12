@@ -17,6 +17,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import uvicorn
+
 from aipanel import __version__, yamlio
 from aipanel.audit import Audit
 from aipanel.backends.demo import DEMO_RULE, demo_site_config
@@ -40,9 +42,22 @@ def site_loader(config: str | None, demo: bool) -> SiteConfigLoader:
     raise ConfigError("no site config: set AIPANEL_CONFIG or --config (or AIPANEL_DEMO=1)")
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    import uvicorn
+def server_config(app: Any, host: str, port: int, **extra: Any) -> uvicorn.Config:
+    # proxy_headers off: the client address is the TCP peer's, never X-Forwarded-For, so the
+    # trusted_proxies check cannot be talked around.
+    return uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        access_log=False,
+        log_config=None,
+        proxy_headers=False,
+        server_header=False,
+        **extra,
+    )
 
+
+def cmd_serve(args: argparse.Namespace) -> int:
     from aipanel.app import create_app, create_ops_app
     from aipanel.panel import Panel
 
@@ -58,19 +73,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
             yield  # the main server handles the signals and then stops this one
 
     async def serve() -> None:
-        main = uvicorn.Server(
-            uvicorn.Config(app, host=args.listen, port=args.port, access_log=False, log_config=None)
-        )
-        side = OpsServer(
-            uvicorn.Config(
-                ops,
-                host=args.listen,
-                port=args.metrics_port,
-                access_log=False,
-                log_config=None,
-                lifespan="off",
-            )
-        )
+        main = uvicorn.Server(server_config(app, args.listen, args.port))
+        side = OpsServer(server_config(ops, args.listen, args.metrics_port, lifespan="off"))
         side_task = asyncio.create_task(side.serve())
         try:
             await main.serve()
@@ -185,7 +189,9 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="run the panel")
-    serve.add_argument("--listen", default=env("AIPANEL_LISTEN", "0.0.0.0"))  # noqa: S104
+    serve.add_argument(
+        "--listen", default=env("AIPANEL_LISTEN", "127.0.0.1"), help="the image sets 0.0.0.0"
+    )
     serve.add_argument("--port", type=int, default=int(env("AIPANEL_PORT", "8080")))
     serve.add_argument("--metrics-port", type=int, default=int(env("AIPANEL_METRICS_PORT", "9090")))
     serve.set_defaults(func=cmd_serve)

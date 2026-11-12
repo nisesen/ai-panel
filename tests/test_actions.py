@@ -240,7 +240,7 @@ async def test_cooldown_between_power_actions(panel: Panel, clock: FakeClock) ->
 
 async def test_disabled_action_does_not_exist(make_panel: MakePanel) -> None:
     panel = make_panel(site_config(**{"actions.enabled": ["probe"]}))
-    with pytest.raises(Refused, match="no action"):
+    with pytest.raises(Refused, match="no such action"):
         await panel.runner.start("shutdown", "alice", {}, HOST)
     assert (await run(panel, "probe", confirm=None)).status == "succeeded"
 

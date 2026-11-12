@@ -292,10 +292,10 @@ async def test_ending_silences_touches_only_the_panels_own() -> None:
         clock=SystemClock(),
         log=steps.append,
     )
-    made = await ctx.silence(datetime(2030, 1, 1, tzinfo=UTC), "planned shutdown")
-    assert made == ["s1", "s2"] and "(2 silences)" in steps[0]
+    await ctx.silence(datetime(2030, 1, 1, tzinfo=UTC), "planned shutdown")
+    assert ctx.silenced == ["s1", "s2"] and "(2 silences)" in steps[0]
     assert all(s["comment"] == "ai-panel: planned shutdown (by alice)" for s in fake.posted)
-    await ctx.end_silences()
+    await ctx.unsilence()
     assert sorted(fake.deleted) == ["s1", "s2"]  # not someone else's, not an expired one
     assert fake.silences["theirs"]["status"]["state"] == "active"
 

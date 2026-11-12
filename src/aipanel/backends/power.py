@@ -8,7 +8,7 @@ import os
 from collections.abc import Sequence
 
 from aipanel.backends.process import CommandTimeout, Run, run
-from aipanel.backends.protocols import BackendError, PowerState, Sensor, Unreachable
+from aipanel.backends.protocols import BackendError, PowerState, Sensor, Timeout, Unreachable
 from aipanel.config.site import BmcConfig
 
 
@@ -37,7 +37,7 @@ class IpmiPower:
         try:
             result = await self.run([*argv, *args], timeout=self.config.timeout_seconds, env=env)
         except CommandTimeout as e:
-            raise Unreachable(f"BMC: {e}") from None
+            raise Timeout(f"BMC: {e}") from None
         except OSError as e:
             raise BackendError(f"BMC: cannot run {self.config.command}: {e}") from None
         if result.returncode != 0:

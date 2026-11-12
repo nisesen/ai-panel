@@ -130,6 +130,7 @@
             ],
             "type": "string"
           },
+          "maxItems": 7,
           "minItems": 1,
           "title": "Days",
           "type": "array"
@@ -169,6 +170,7 @@
           "items": {
             "$ref": "#/$defs/ScheduleRule"
           },
+          "maxItems": 50,
           "title": "Rules",
           "type": "array"
         },
@@ -176,7 +178,7 @@
           "default": 30,
           "description": "Act on a boundary missed while the panel was down, up to",
           "maximum": 720,
-          "minimum": 0,
+          "minimum": 1,
           "title": "Catch Up Minutes",
           "type": "integer"
         },
@@ -249,10 +251,10 @@
       "additionalProperties": false,
       "properties": {
         "command_seconds": {
-          "default": 120,
-          "description": "One llm-ctl command, at most",
+          "default": 300,
+          "description": "One llm-ctl command, at most: keep it above llm-ctl's limit_seconds (240)",
           "maximum": 900,
-          "minimum": 10,
+          "minimum": 60,
           "title": "Command Seconds",
           "type": "integer"
         },

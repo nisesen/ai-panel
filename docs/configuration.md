@@ -27,11 +27,11 @@ Editors that understand `# yaml-language-server: $schema=...` complete and check
 | Section | What it holds |
 | --- | --- |
 | `site` | the host's name (typed to confirm power actions), the time zone, header links, the emergency warning text |
-| `auth` | `trusted_header` with the header names and allowed groups, or `none` (DEMO only); see [security.md](security.md) |
+| `auth` | `trusted_header` with the header names, the allowed groups and the proxy's addresses (`trusted_proxies`, required), or `none` (DEMO only); see [security.md](security.md) |
 | `bmc` | the BMC's address, user and password references, cipher suite (`-C`), privilege (`-L`) |
 | `host` | the host agent over SSH: address, user, key, known_hosts; the guests the panel may touch; which guest runs the LLM |
 | `llm` | llama.cpp's URL; its API key reference, optional ([security.md](security.md#the-llms-api-key)); the models (`name` as in llm-ctl's config, `match`: text in `/props` that identifies it); `pause_client_checks`: pause a client's checks of the LLM (user timers in a guest VM) around planned LLM stops |
-| `prometheus` | its URL; queries for the GPUs (one series per GPU) and the decode speed |
+| `prometheus` | its URL; queries for the GPUs (one series per GPU) and the decode speed; `retention_days` (default 15): cost history starts no earlier, and the page says so |
 | `alertmanager` | its URL, and `silences`: the matcher sets a planned stop silences, one silence per set (below) |
 | `actions` | `enabled` (all when not given) and `dry_run` (read everything, only log changes) |
 | `cost` | the power source and the price source, each `prometheus` (a query) or `static` (watts; a time-of-use tariff) |
@@ -70,7 +70,11 @@ alertmanager:
 ```
 
 When the host is back (a power on or a reboot), the panel expires every silence it made,
-recognised by `created_by` (default `ai-panel`), and never touches anyone else's.
+recognised by `created_by` (default `ai-panel`), and never touches anyone else's. A shutdown or
+reboot that fails while the host is still up ends the silences it made at once. While the host
+is off, a skip or a hold that moves the schedule's next on later extends the silences to it.
+A silence time given through the API must carry a time zone and end within 7 days (or at the
+schedule's next on); the dashboard's "until the next scheduled on" is worked out by the panel.
 
 ### A static tariff
 
@@ -100,8 +104,8 @@ every setting has a default, and **the schedule is off by default**.
 
 | Group | Examples |
 | --- | --- |
-| `schedule` | `enabled`, `rules` (`{name, days, off, on}`), `catch_up_minutes`, `busy_retry_minutes`, `busy_grace_minutes`, `force_after_grace`, `boot_grace_minutes` |
-| `timeouts` | one llm-ctl command, a boot, the LLM becoming healthy, a shutdown, a guest |
+| `schedule` | `enabled`, `rules` (`{name, days, off, on}`, at most 50), `catch_up_minutes` (at least 1), `busy_retry_minutes`, `busy_grace_minutes`, `force_after_grace`, `boot_grace_minutes` |
+| `timeouts` | one llm-ctl command (default 300 s: keep it above llm-ctl's `limit_seconds`, [agent.md](agent.md)), a boot, the LLM becoming healthy, a shutdown, a guest |
 | `cooldowns` | seconds between two power actions |
 | `silences` | how long a manual shutdown, a reboot and an emergency action silence alerts |
 | `cost` | `standby_watts` (measure it), `idle_watts` (empty: the 10th percentile of 7 days) |
@@ -157,9 +161,19 @@ curl -X PATCH https://panel.example.com/api/settings \
 
 ## The state directory
 
-`AIPANEL_STATE_DIR` (default `/var/lib/aipanel`) holds `settings.json`, `audit.jsonl` (one
-JSON line per event, also printed to stdout), `scheduler.json` (handled boundaries, holds,
-skips), `power.jsonl` (power changes the panel saw, for the static power source) and
-`csrf.key` (mode 0600, the key of the pages' CSRF tokens, made on the first start). A few
-kilobytes; back it up like other apps' data. It is safe on NFS with one panel. When it is not
-writable, the panel still runs, read-only, and says so on every page.
+`AIPANEL_STATE_DIR` (default `/var/lib/aipanel`) holds:
+
+- `settings.json`;
+- `audit.jsonl`: one JSON line per event, also printed to stdout; over 5 MB it moves to
+  `audit.jsonl.1`;
+- `scheduler.json`: handled boundaries, holds, skips, the running boundary;
+- `runner.json`: how each action last ended, for the failure metrics and the emergency actions
+  after a restart;
+- `power.jsonl`: power changes the panel saw, for cost history (off or a gap in the data);
+- `csrf.key`: the key of the pages' CSRF tokens, made on the first start.
+
+A few kilobytes; back it up like other apps' data. Files are `0640` (`csrf.key` `0600`), so a
+backup job in the panel's group can read them. Writes happen on a background thread, so a slow
+or stalled NFS mount never holds up the pages, the poller or an action. It is safe on NFS with
+one panel. When it is missing, unreadable or not writable, the panel still runs, read-only, and
+says so on every page.

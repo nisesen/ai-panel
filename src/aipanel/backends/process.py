@@ -37,10 +37,13 @@ async def run(
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        await proc.wait()
         raise CommandTimeout(f"{argv[0]} did not finish within {timeout:g} s") from None
+    finally:
+        # Also when the caller is cancelled: never leave an ssh or ipmitool child behind.
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await asyncio.shield(proc.wait())
     return Result(
         proc.returncode if proc.returncode is not None else -1,
         out.decode(errors="replace"),

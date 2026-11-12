@@ -60,6 +60,7 @@ class Report:
     estimated_future: bool
     computed_at: datetime
     error: str | None = None
+    history_from: datetime | None = None  # set when Prometheus's retention cuts history short
 
 
 def percentile(values: list[float], fraction: float) -> float | None:
@@ -161,7 +162,11 @@ class CostService:
         )
         if b.power_source is None or b.price_source is None:
             return replace(empty, error="no cost section in the site config")
-        start = min(month, week)
+        start, history_from = min(month, week), None
+        if site.cost is not None and site.cost.power.source == "prometheus" and site.prometheus:
+            kept = now - timedelta(days=site.prometheus.retention_days)
+            if kept > start:
+                start = history_from = kept
         try:
             power = await b.power_source.history(start, now, STEP)
             prices = await b.price_source.history(start, now, STEP)
@@ -174,7 +179,7 @@ class CostService:
             idle, source = percentile(readings, 0.10), "10th percentile of 7 days"
 
         def total(since: datetime) -> Total:
-            return integrate(grid(since, now, STEP), power, prices, idle, standby)
+            return integrate(grid(max(since, start), now, STEP), power, prices, idle, standby)
 
         hours, saving = await self._forecast(b, site, settings, now, idle, standby)
         return Report(
@@ -190,6 +195,7 @@ class CostService:
             forecast_off_hours=hours,
             estimated_future=b.price_source.estimated_future,
             computed_at=now,
+            history_from=history_from,
         )
 
     async def _forecast(

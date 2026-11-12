@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from aipanel.backends.process import CommandTimeout, Run, run
-from aipanel.backends.protocols import BackendError, Unreachable
+from aipanel.backends.protocols import BackendError, Timeout, Unreachable
 from aipanel.config.site import HostConfig
 
 WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -63,7 +63,7 @@ class SshAgent:
         try:
             result = await self.run(self.argv(args), timeout=timeout, env=env)
         except CommandTimeout as e:
-            raise Unreachable(f"host agent: {e}") from None
+            raise Timeout(f"host agent: {e}") from None
         except OSError as e:
             raise BackendError(f"host agent: cannot run {self.config.command}: {e}") from None
         if result.returncode == 255:  # ssh's own failure: no connection, refused key, ...

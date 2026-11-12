@@ -23,15 +23,16 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
+from aipanel import files
 from aipanel.actions.base import Refused, protected_window
 from aipanel.audit import Audit
+from aipanel.backends import Backends
 from aipanel.clock import Clock
 from aipanel.config.settings import ScheduleRule, ScheduleSettings, Settings
 from aipanel.config.site import SiteConfig
-from aipanel.files import atomic_write
 from aipanel.metrics import PanelMetrics
 from aipanel.poller import Poller, Snapshot
-from aipanel.runner import Runner
+from aipanel.runner import Job, Runner
 from aipanel.weekly import WEEKDAYS, minutes
 
 log = logging.getLogger("aipanel.scheduler")
@@ -39,6 +40,7 @@ log = logging.getLogger("aipanel.scheduler")
 ACTOR = "scheduler"
 TICK_SECONDS = 30
 KEEP_DAYS = 14
+SAVE_TICK_EVERY = timedelta(minutes=5)
 
 Kind = Literal["off", "on"]
 
@@ -83,13 +85,24 @@ def boundaries(
 
 
 class Pending(BaseModel):
-    """An off boundary waiting for the host to be idle."""
+    """An off boundary waiting for the host to be idle, or reachable."""
 
     id: str
     at: datetime
     first: datetime
     next: datetime
     reason: str
+
+
+class Running(BaseModel):
+    """A boundary whose action runs: it is marked by how the action ends, not by its start."""
+
+    id: str
+    rule: str
+    kind: Kind
+    at: datetime
+    action: str
+    job: str
 
 
 class Handled(BaseModel):
@@ -109,6 +122,7 @@ class State(BaseModel):
     hold_on_until: datetime | None = None
     hold_off_until: datetime | None = None
     pending: Pending | None = None
+    running: Running | None = None
     last: Handled | None = None
     seen: dict[str, datetime] = Field(default_factory=dict)  # rule fingerprint -> first seen
     enabled_since: datetime | None = None
@@ -120,6 +134,7 @@ class Scheduler:
         path: Path | None,
         site: Callable[[], SiteConfig],
         settings: Callable[[], Settings],
+        backends: Callable[[], Backends],
         runner: Runner,
         poller: Poller,
         clock: Clock,
@@ -129,25 +144,38 @@ class Scheduler:
         self.path = path
         self.site = site
         self.settings = settings
+        self.backends = backends
         self.runner = runner
         self.poller = poller
         self.clock = clock
         self.audit = audit
         self.metrics = metrics
         self.state = State()
-        if path is not None and path.exists():
+        self._saved = ""
+        self._saved_tick: datetime | None = None
+        self._silenced_until: datetime | None = None
+        if path is not None:
+            files.flush()
             try:
                 self.state = State.model_validate_json(path.read_text())
-            except ValueError as e:
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as e:
                 log.error("scheduler state %s unreadable, starting afresh: %s", path, e)
+        if self.state.last is not None:  # so a failure still alerts after a restart
+            self._measure(self.state.last)
 
-    def _save(self) -> None:
+    def _save(self, now: datetime) -> None:
+        """Queue a write when something changed; the tick time alone, every few minutes."""
         if self.path is None:
             return
-        try:
-            atomic_write(self.path, self.state.model_dump_json(indent=2) + "\n")
-        except OSError as e:
-            log.error("scheduler state not saved: %s", e)
+        changed = self.state.model_dump_json(exclude={"last_tick"})
+        stale = self._saved_tick is None or now - self._saved_tick >= SAVE_TICK_EVERY
+        if changed == self._saved and not stale:
+            return
+        self._saved, self._saved_tick = changed, now
+        path, text = self.path, self.state.model_dump_json(indent=2) + "\n"
+        files.in_background(lambda: files.atomic_write(path, text))
 
     async def run(self) -> None:
         while True:
@@ -163,10 +191,12 @@ class Scheduler:
         schedule, site, now = self.settings().schedule, self.site(), self.clock.now()
         st = self.state
         self.metrics.set("aipanel_schedule_enabled", 1 if schedule.enabled else 0)
+        self.metrics.set("aipanel_scheduler_last_tick_timestamp", now.timestamp())
         self._tidy(now)
+        self._check_running(now)
         if not schedule.enabled:
             st.enabled_since, st.pending, st.last_tick = None, None, now
-            self._save()
+            self._save(now)
             return
         if st.enabled_since is None:
             st.enabled_since = now
@@ -187,25 +217,18 @@ class Scheduler:
             *older, latest = due
             for b in older:
                 late = now - b.at > catch_up and not (st.pending and st.pending.id == b.id)
-                self._mark(
-                    b,
-                    now,
-                    "missed: the panel was not running"
-                    if late
-                    else "superseded by a later boundary",
-                    ok=not late,
-                )
+                result = "missed: the panel was not running" if late else "superseded"
+                self._mark(b, now, result, ok=not late)
             if st.pending is not None and st.pending.id != latest.id:
                 st.pending = None
-            waiting = st.pending is not None
-            if not waiting and now - latest.at > catch_up:
-                self._mark(
-                    latest, now, f"missed: more than {schedule.catch_up_minutes} min late", ok=False
-                )
+            if st.pending is None and now - latest.at > catch_up:
+                late_by = f"more than {schedule.catch_up_minutes} min late"
+                self._mark(latest, now, f"missed: {late_by}", ok=False)
             else:
                 await self._act(latest, now, schedule, site)
+        await self._keep_silenced(now, schedule)
         st.last_tick = now
-        self._save()
+        self._save(now)
 
     async def _act(
         self, b: Boundary, now: datetime, schedule: ScheduleSettings, site: SiteConfig
@@ -230,16 +253,16 @@ class Scheduler:
             await self._power_off(b, now, snapshot, schedule, site)
 
     async def _power_on(self, b: Boundary, now: datetime, snap: Snapshot, site: SiteConfig) -> None:
-        if snap.power == "on":
+        if snap.power == "on" or snap.host is not None:
             self._mark(b, now, "on already", ok=True)
             return
         try:
             job = await self.runner.start("power_on", ACTOR, confirmation=site.site.name)
         except Refused as e:
-            if not e.retryable:  # a retryable refusal is tried again on the next tick
+            if not e.retryable:  # a retryable one is tried again within the catch-up time
                 self._mark(b, now, f"refused: {e}", ok=False)
             return
-        self._mark(b, now, f"started power_on (job {job.id})", ok=True)
+        self._started(b, job)
 
     async def _power_off(
         self,
@@ -251,25 +274,22 @@ class Scheduler:
     ) -> None:
         st = self.state
         if snap.power == "off":
-            st.pending = None
             self._mark(b, now, "off already", ok=True)
             return
         window = protected_window(site, now)
         if window is not None:
-            st.pending = None
             self._mark(b, now, f"refused: inside the protected window {window.reason!r}", ok=False)
             return
         busy = snap.busy_reason() or ("another action is running" if self.runner.busy else None)
         if busy is None:
             try:
-                await self._shutdown(b, now, schedule, site, force=False)
+                await self._shutdown(b, site, force=False)
                 return
             except Refused as e:
                 if not e.retryable:
-                    st.pending = None
                     self._mark(b, now, f"refused: {e}", ok=False)
                     return
-                busy = str(e)
+                busy = str(e)  # the host or the BMC does not answer: try again, as when busy
         pending = st.pending or Pending(id=b.id, at=b.at, first=now, next=now, reason=busy)
         grace = timedelta(minutes=schedule.busy_grace_minutes)
         if now - pending.first < grace:
@@ -284,41 +304,55 @@ class Scheduler:
                 retry_at=pending.next.isoformat(),
             )
             return
-        st.pending = None
         if not schedule.force_after_grace:
-            self._mark(
-                b, now, f"skipped: busy for {schedule.busy_grace_minutes} min ({busy})", ok=False
-            )
+            minutes = schedule.busy_grace_minutes
+            self._mark(b, now, f"skipped: busy or unreachable for {minutes} min ({busy})", ok=False)
             return
         try:
-            await self._shutdown(b, now, schedule, site, force=True, why=busy)
+            await self._shutdown(b, site, force=True, why=busy)
         except Refused as e:
             self._mark(b, now, f"refused: {e}", ok=False)
 
-    async def _shutdown(
-        self,
-        b: Boundary,
-        now: datetime,
-        schedule: ScheduleSettings,
-        site: SiteConfig,
-        force: bool,
-        why: str = "",
-    ) -> None:
-        on_at = self.next_on(now)
-        params = {}
-        if on_at is not None:
-            until = on_at + timedelta(minutes=schedule.boot_grace_minutes)
-            params["silence_until"] = until.isoformat()
+    async def _shutdown(self, b: Boundary, site: SiteConfig, force: bool, why: str = "") -> None:
         job = await self.runner.start(
-            "shutdown", ACTOR, params, confirmation=site.site.name, force=force
+            "shutdown", ACTOR, {"until_next_on": True}, confirmation=site.site.name, force=force
         )
-        self.state.pending = None
-        forced = f", forced although busy ({why})" if force else ""
-        self._mark(b, now, f"started shutdown (job {job.id}){forced}", ok=True)
+        self._started(b, job, f", forced although busy ({why})" if force else "")
+
+    def _started(self, b: Boundary, job: Job, note: str = "") -> None:
+        st = self.state
+        st.done[b.id] = f"started {job.action} (job {job.id}){note}"
+        st.running = Running(
+            id=b.id, rule=b.rule, kind=b.kind, at=b.at, action=job.action, job=job.id
+        )
+        if st.pending is not None and st.pending.id == b.id:
+            st.pending = None
+        self.audit.record("schedule.started", ACTOR, boundary=b.id, job=job.id, note=note)
+
+    def _check_running(self, now: datetime) -> None:
+        """Mark the running boundary by how its action ended."""
+        running = self.state.running
+        if running is None:
+            return
+        job = self.runner.job(running.job)
+        if job is not None and job.running:
+            return
+        self.state.running = None
+        b = Boundary(running.rule, running.kind, running.at)
+        if job is None:
+            self._mark(b, now, f"{running.action}: the panel restarted while it ran", ok=False)
+            return
+        ended = f"{running.action} {job.status.replace('_', ' ')}"
+        self._mark(
+            b, now, f"{ended}: {job.error}" if job.error else ended, ok=job.status == "succeeded"
+        )
 
     def _mark(self, b: Boundary, now: datetime, result: str, ok: bool) -> None:
-        self.state.done[b.id] = result
-        self.state.last = Handled(
+        st = self.state
+        st.done[b.id] = result
+        if st.pending is not None and st.pending.id == b.id:
+            st.pending = None
+        st.last = Handled(
             id=b.id, rule=b.rule, kind=b.kind, at=b.at, result=result, ok=ok, handled_at=now
         )
         self.audit.record(
@@ -330,8 +364,33 @@ class Scheduler:
             result=result,
             ok=ok,
         )
-        self.metrics.set("aipanel_schedule_last_boundary_timestamp", now.timestamp())
-        self.metrics.set("aipanel_schedule_last_boundary_success", 1 if ok else 0)
+        self._measure(st.last)
+
+    def _measure(self, handled: Handled) -> None:
+        self.metrics.set("aipanel_schedule_last_boundary_timestamp", handled.handled_at.timestamp())
+        self.metrics.set("aipanel_schedule_last_boundary_success", 1 if handled.ok else 0)
+
+    async def _keep_silenced(self, now: datetime, schedule: ScheduleSettings) -> None:
+        """While the host is off, its silences last until the schedule's next on: a skip or a
+        hold that moves that on later extends them."""
+        snap, silences = self.poller.snapshot, self.backends().silences
+        on_at = self.next_on(now)
+        if snap.power != "off" or not snap.silences or silences is None or on_at is None:
+            return
+        until = on_at + timedelta(minutes=schedule.boot_grace_minutes)
+        if until == self._silenced_until or max(s.ends_at for s in snap.silences) >= until:
+            return
+        try:
+            await silences.create(
+                until, "ai-panel: the host stays off until the schedule's next on"
+            )
+            for old in snap.silences:
+                await silences.expire(old.id)
+        except Exception as e:
+            log.warning("silences not extended: %s", e)
+            return
+        self._silenced_until = until
+        self.audit.record("schedule.silences_extended", ACTOR, until=until.isoformat())
 
     def _tidy(self, now: datetime) -> None:
         st = self.state
@@ -365,27 +424,31 @@ class Scheduler:
         return out
 
     def next_on(self, after: datetime) -> datetime | None:
-        rules = self.settings().schedule.rules
-        st = self.state
-        for b in boundaries(rules, self.site().site.tz, after, after + timedelta(days=8)):
-            held = st.hold_off_until is not None and b.at < st.hold_off_until
-            if b.kind == "on" and b.id not in st.skip and not held:
+        """When the schedule will next switch the host on; None when it will not."""
+        schedule, st = self.settings().schedule, self.state
+        if not schedule.enabled:
+            return None
+        start = max(after, st.hold_off_until or after)  # nothing switches on during a hold off
+        for b in boundaries(schedule.rules, self.site().site.tz, start, start + timedelta(days=8)):
+            if b.kind == "on" and b.id not in st.skip:
                 return b.at
         return None
 
     def skip(self, boundary_id: str, actor: str) -> None:
-        if boundary_id not in {b.id for b, _ in self.upcoming(days=8)}:
+        pending = self.state.pending
+        upcoming = {b.id for b, _ in self.upcoming(days=8)}
+        if boundary_id not in upcoming and not (pending and pending.id == boundary_id):
             raise ValueError("no such upcoming boundary")
         if boundary_id not in self.state.skip:
             self.state.skip.append(boundary_id)
         self.audit.record("schedule.skip", actor, boundary=boundary_id)
-        self._save()
+        self._save(self.clock.now())
 
     def unskip(self, boundary_id: str, actor: str) -> None:
         if boundary_id in self.state.skip:
             self.state.skip.remove(boundary_id)
             self.audit.record("schedule.unskip", actor, boundary=boundary_id)
-            self._save()
+            self._save(self.clock.now())
 
     def hold(self, kind: Kind, until: datetime, actor: str) -> None:
         now = self.clock.now()
@@ -398,12 +461,12 @@ class Scheduler:
         else:
             self.state.hold_off_until, self.state.hold_on_until = until, None
         self.audit.record("schedule.hold", actor, kind=kind, until=until.isoformat())
-        self._save()
+        self._save(now)
 
     def clear_holds(self, actor: str) -> None:
         self.state.hold_on_until = self.state.hold_off_until = None
         self.audit.record("schedule.hold_cleared", actor)
-        self._save()
+        self._save(self.clock.now())
 
 
 def _when(boundary_id: str) -> datetime:

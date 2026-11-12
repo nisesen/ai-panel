@@ -4,9 +4,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from aipanel import __version__
 from aipanel.api.routes import router as api_router
@@ -15,12 +16,40 @@ from aipanel.panel import Panel
 from aipanel.web.routes import router as web_router
 
 STATIC = Path(__file__).parent / "web" / "static"
+MAX_BODY = 64 * 1024  # the largest settings import is a few kilobytes
 
 # Scripts and styles only from the panel itself; htmx is configured not to evaluate code.
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
     "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 )
+
+
+class BodyLimit:
+    """Refuse request bodies over MAX_BODY, declared or streamed."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = dict(scope["headers"]).get(b"content-length", b"0")
+        if not declared.isdigit() or int(declared) > MAX_BODY:
+            await PlainTextResponse("request body too large", 413)(scope, receive, send)
+            return
+        seen = 0
+
+        async def limited() -> Message:
+            nonlocal seen
+            message = await receive()
+            seen += len(message.get("body", b""))
+            if seen > MAX_BODY:
+                raise HTTPException(413, "request body too large")
+            return message
+
+        await self.app(scope, limited, send)
 
 
 def create_app(panel: Panel, run_background: bool = True) -> FastAPI:
@@ -61,6 +90,7 @@ def create_app(panel: Panel, run_background: bool = True) -> FastAPI:
         response.headers.setdefault("Cache-Control", "no-store")
         return response
 
+    app.add_middleware(BodyLimit)
     app.include_router(api_router)
     app.include_router(web_router)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")

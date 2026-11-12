@@ -21,7 +21,9 @@ class Model(BaseModel):
 class ScheduleRule(Model):
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}$")
     enabled: bool = True
-    days: list[Weekday] = Field(min_length=1, description="The days the off time falls on")
+    days: list[Weekday] = Field(
+        min_length=1, max_length=7, description="The days the off time falls on"
+    )
     off: HHMM = Field(description="Power off at (site time)")
     on: HHMM = Field(description="Power on at; before the off time means the next day")
 
@@ -36,9 +38,9 @@ class ScheduleRule(Model):
 
 class ScheduleSettings(Model):
     enabled: bool = Field(False, description="Run the schedule rules")
-    rules: list[ScheduleRule] = Field(default_factory=list)
+    rules: list[ScheduleRule] = Field(default_factory=list, max_length=50)
     catch_up_minutes: int = Field(
-        30, ge=0, le=720, description="Act on a boundary missed while the panel was down, up to"
+        30, ge=1, le=720, description="Act on a boundary missed while the panel was down, up to"
     )
     busy_retry_minutes: int = Field(
         5, ge=1, le=60, description="When busy at an off time, try again every"
@@ -62,7 +64,12 @@ class ScheduleSettings(Model):
 
 
 class TimeoutSettings(Model):
-    command_seconds: int = Field(120, ge=10, le=900, description="One llm-ctl command, at most")
+    command_seconds: int = Field(
+        300,
+        ge=60,
+        le=900,
+        description="One llm-ctl command, at most: keep it above llm-ctl's limit_seconds (240)",
+    )
     boot_seconds: int = Field(
         900, ge=60, le=3600, description="Power on or reboot until the host answers SSH"
     )

@@ -22,6 +22,9 @@ HELP = {
         "0 when the last boundary was skipped, refused or failed to start",
     ),
     "aipanel_backend_up": ("gauge", "1 when the backend answered the last poll"),
+    "aipanel_bmc_last_success_timestamp": ("gauge", "When the BMC last answered (unix time)"),
+    "aipanel_poll_last_timestamp": ("gauge", "When the poller last finished (unix time)"),
+    "aipanel_scheduler_last_tick_timestamp": ("gauge", "When the scheduler last ran (unix time)"),
 }
 
 

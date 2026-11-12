@@ -7,7 +7,7 @@ planned switch does not page anyone.
 """
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -47,6 +47,7 @@ async def read_back(ctx: ActionContext, expect: str | None) -> None:
 
 class LlmAction(Action):
     group = "llm"
+    resume_checks: ClassVar[bool] = True  # after a stop, the checks stay paused
 
     def limit(self, s: Settings) -> float:
         return 3 * s.timeouts.command_seconds + s.timeouts.llm_ready_seconds + 60
@@ -55,14 +56,21 @@ class LlmAction(Action):
         require_host_up(ctx)
 
     async def run(self, ctx: ActionContext) -> None:
-        pause = ctx.site.llm.pause_client_checks
-        if pause:
-            await ctx.agent("client-checks", "pause")
+        checks = ctx.site.llm.pause_client_checks
+        if checks:
+            await self.checks(ctx, "pause")
         try:
             await self.steps(ctx)
         finally:
-            if pause:
-                await ctx.agent("client-checks", "resume")
+            if checks and self.resume_checks:
+                await self.checks(ctx, "resume")
+
+    async def checks(self, ctx: ActionContext, op: str) -> None:
+        """Pause or resume a client's checks; a failure is a warning, never the action's error."""
+        try:
+            await ctx.agent("client-checks", op)
+        except BackendError as e:
+            ctx.log(f"warning: client checks not {op}d ({e})")
 
     async def steps(self, ctx: ActionContext) -> None:
         raise NotImplementedError
@@ -121,6 +129,7 @@ class LlmStop(LlmAction):
     name = "llm_stop"
     label = "Stop LLM"
     confirm = Confirm.CONFIRM
+    resume_checks = False  # the LLM stays down: so do the checks, until it starts again
     warning = "Every client of the LLM gets errors until it is started again."
 
     async def steps(self, ctx: ActionContext) -> None:

@@ -87,9 +87,8 @@ async def test_off_then_on(panel: Panel, clock: FakeClock) -> None:
     await enable(panel, clock, at("22:50"))
     await tick(panel, clock, at("23:00", seconds=10))
     assert jobs(panel) == [("shutdown", "scheduler")] and lab(panel).power == "off"
-    shutdown = panel.runner.history[0]
-    until = datetime.fromisoformat(shutdown.params["silence_until"])
-    assert until == at("07:20", 1)  # the next on time and the boot grace
+    silences = await panel.backends.silences.active()  # type: ignore[union-attr]
+    assert {s.ends_at for s in silences} == {at("07:20", 1)}  # the next on and the boot grace
     await tick(panel, clock, at("23:00", seconds=40))
     assert len(jobs(panel)) == 1  # each boundary acts once
     await tick(panel, clock, at("07:00", 1, seconds=10))
@@ -187,7 +186,7 @@ async def test_busy_waits_then_skips(panel: Panel, clock: FakeClock) -> None:
     assert panel.scheduler.state.pending is not None
     await tick(panel, clock, at("23:31"))
     assert jobs(panel) == [] and panel.scheduler.state.pending is None
-    assert result(panel, "off", at("23:00")).startswith("skipped: busy for 30 min")
+    assert result(panel, "off", at("23:00")).startswith("skipped: busy or unreachable for 30 min")
     assert panel.metrics.get("aipanel_schedule_last_boundary_success") == 0
 
 
@@ -233,7 +232,9 @@ async def test_handled_boundaries_survive_a_restart(
     await enable(panel, clock, at("22:50"))
     await tick(panel, clock, at("23:00", seconds=10))
     s = panel.scheduler
-    again = Scheduler(s.path, s.site, s.settings, s.runner, s.poller, clock, s.audit, s.metrics)
+    again = Scheduler(
+        s.path, s.site, s.settings, s.backends, s.runner, s.poller, clock, s.audit, s.metrics
+    )
     clock.set(at("23:01"))
     await again.tick()
     await panel.runner.wait()

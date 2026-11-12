@@ -76,9 +76,12 @@ Two files, and each setting lives in exactly one of them:
   `aipanel settings set schedule.enabled=true`.
 
 [docs/configuration.md](docs/configuration.md) explains both, and how an agent edits each.
+[docs/kubernetes.md](docs/kubernetes.md) has example manifests, with the NetworkPolicy that
+keeps the sign-in headers trustworthy.
 The environment: `AIPANEL_CONFIG` (the site config's path), `AIPANEL_STATE_DIR` (default
-`/var/lib/aipanel`), `AIPANEL_PORT` (8080), `AIPANEL_METRICS_PORT` (9090, for `/metrics` and
-`/healthz`), `AIPANEL_DEMO=1`.
+`/var/lib/aipanel`), `AIPANEL_LISTEN` (default 127.0.0.1; the image sets 0.0.0.0),
+`AIPANEL_PORT` (8080), `AIPANEL_METRICS_PORT` (9090, for `/metrics` and `/healthz`),
+`AIPANEL_DEMO=1`.
 
 ## Security
 

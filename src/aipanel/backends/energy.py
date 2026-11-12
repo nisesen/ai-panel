@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from aipanel import weekly
+from aipanel import files, weekly
 from aipanel.backends.protocols import Grid, Metrics, PowerState, PricePoint
 from aipanel.config.site import Tariff
 
@@ -34,6 +34,7 @@ class PowerLog:
         self.times: list[float] = []
         self.states: list[str] = []
         if path is not None and path.exists():
+            files.flush()
             for line in path.read_text().splitlines():
                 try:
                     entry = json.loads(line)
@@ -52,11 +53,8 @@ class PowerLog:
         self.times.append(at.timestamp())
         self.states.append(state)
         if self.path is not None:
-            try:
-                with self.path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({"t": at.timestamp(), "state": state}) + "\n")
-            except OSError:
-                pass  # a read-only state directory: kept in memory only
+            path, line = self.path, json.dumps({"t": at.timestamp(), "state": state})
+            files.in_background(lambda: files.append_line(path, line))
 
     def state_at(self, t: float) -> str | None:
         i = bisect.bisect_right(self.times, t)
@@ -81,9 +79,13 @@ class StaticPower:
 
 
 class PrometheusPower:
-    def __init__(self, metrics: Metrics, query: str) -> None:
+    """Watts from a query. A step without a reading is off only when the panel saw the host
+    off then (its power log); otherwise it is a gap in the data, and counts neither way."""
+
+    def __init__(self, metrics: Metrics, query: str, log: PowerLog | None = None) -> None:
         self.metrics = metrics
         self.query = query
+        self.log = log
 
     async def watts(self) -> float | None:
         samples = await self.metrics.query(self.query)
@@ -99,8 +101,13 @@ class PrometheusPower:
         for s in series:
             for t, value in s.points:
                 summed[round(t)] = summed.get(round(t), 0.0) + value
-        # No sample means no exporter answered: the host was off.
-        return {t: summed.get(t) for t in steps}
+        out: Grid = {}
+        for t in steps:
+            if t in summed:
+                out[t] = summed[t]
+            elif self.log is not None and self.log.state_at(t) == "off":
+                out[t] = None
+        return out
 
 
 class StaticPrice:
@@ -145,12 +152,14 @@ class PrometheusPrice:
         query: str,
         period_label: str | None,
         currency: str,
+        tz: ZoneInfo,
         now: Callable[[], datetime],
     ) -> None:
         self.metrics = metrics
         self.query = query
         self.period_label = period_label
         self.currency = currency
+        self.tz = tz
         self.clock_now = now
 
     def _period(self, labels: dict[str, str]) -> str | None:
@@ -184,7 +193,8 @@ class PrometheusPrice:
         out: dict[int, PricePoint] = {}
         for t in grid(start, end, step):
             weeks = 1 + max(0, math.floor((t - now.timestamp()) / WEEK_SECONDS))
-            back = t - weeks * WEEK_SECONDS
+            # The same weekday and wall-clock time, in the site's time zone, weeks earlier.
+            back = (datetime.fromtimestamp(t, self.tz) - timedelta(weeks=weeks)).timestamp()
             i = bisect.bisect_right(times, back)
             out[t] = past[times[i - 1]] if i else past[times[0]]
         return out

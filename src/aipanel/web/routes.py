@@ -5,7 +5,8 @@ message. htmx (`hx-boost`) makes the same forms and links swap the page in place
 the status and the running action.
 """
 
-from datetime import datetime, timedelta
+import asyncio
+from datetime import datetime
 from functools import partial
 from typing import Any
 
@@ -74,6 +75,12 @@ def back(request: Request, url: str, kind: str, message: str) -> RedirectRespons
     return RedirectResponse(url, status_code=303)
 
 
+def local_path(value: str, default: str) -> str:
+    """A path on this site to go back to; anything else (//host, a scheme) is not."""
+    ok = value.startswith("/") and not value.startswith("//") and "\\" not in value
+    return value if ok else default
+
+
 def _text(form: FormData, name: str) -> str:
     value = form.get(name)
     return value.strip() if isinstance(value, str) else ""
@@ -121,10 +128,7 @@ async def start_action(request: Request, name: str) -> RedirectResponse:
     form = await request.form()
     params: dict[str, Any] = {k: _text(form, k) for k in PARAM_FIELDS if _text(form, k)}
     if _text(form, "silence") == "next_on":
-        on_at = panel.scheduler.next_on(panel.clock.now())
-        if on_at is not None:
-            grace = panel.store.get().schedule.boot_grace_minutes
-            params["silence_until"] = (on_at + timedelta(minutes=grace)).isoformat()
+        params["until_next_on"] = True  # the action computes it, from the schedule
     elif _text(form, "silence"):
         params["silence_minutes"] = _text(form, "silence")
     try:
@@ -152,10 +156,12 @@ async def schedule_page(request: Request) -> HTMLResponse:
     )
 
 
-def _change_settings(request: Request, changes: dict[str, Any], url: str, ok: str) -> Response:
+async def _change_settings(
+    request: Request, changes: dict[str, Any], url: str, ok: str
+) -> Response:
     panel, user = panel_of(request), user_of(request)
-    try:
-        panel.store.update(changes, user.name)
+    try:  # validation and the file lock, off the event loop
+        await asyncio.to_thread(panel.store.update, changes, user.name)
     except SettingsError as e:
         return back(request, url, "error", f"Not saved: {e}")
     return back(request, url, "ok", ok)
@@ -165,7 +171,7 @@ def _change_settings(request: Request, changes: dict[str, Any], url: str, ok: st
 async def schedule_enabled(request: Request) -> Response:
     enable = _text(await request.form(), "enabled") == "true"
     message = "The schedule runs." if enable else "The schedule is off."
-    return _change_settings(request, {"schedule.enabled": enable}, "/schedule", message)
+    return await _change_settings(request, {"schedule.enabled": enable}, "/schedule", message)
 
 
 @router.post("/schedule/rules")
@@ -178,7 +184,7 @@ async def add_rule(request: Request) -> Response:
         "on": _text(form, "on"),
     }
     rules = [r.model_dump() for r in panel_of(request).store.get().schedule.rules]
-    return _change_settings(
+    return await _change_settings(
         request, {"schedule.rules": [*rules, rule]}, "/schedule", f"Rule {rule['name']} added."
     )
 
@@ -187,7 +193,9 @@ async def add_rule(request: Request) -> Response:
 async def delete_rule(request: Request, name: str) -> Response:
     rules = [r.model_dump() for r in panel_of(request).store.get().schedule.rules]
     kept = [r for r in rules if r["name"] != name]
-    return _change_settings(request, {"schedule.rules": kept}, "/schedule", f"Rule {name} removed.")
+    return await _change_settings(
+        request, {"schedule.rules": kept}, "/schedule", f"Rule {name} removed."
+    )
 
 
 @router.post("/schedule/rules/{name}/toggle")
@@ -196,7 +204,7 @@ async def toggle_rule(request: Request, name: str) -> Response:
     for r in rules:
         if r["name"] == name:
             r["enabled"] = not r["enabled"]
-    return _change_settings(
+    return await _change_settings(
         request, {"schedule.rules": rules}, "/schedule", f"Rule {name} changed."
     )
 
@@ -212,8 +220,8 @@ async def skip(request: Request) -> Response:
         else:
             panel.scheduler.skip(boundary, user.name)
     except ValueError as e:
-        return back(request, _text(form, "next") or "/schedule", "error", str(e))
-    return back(request, _text(form, "next") or "/schedule", "ok", "Schedule updated.")
+        return back(request, local_path(_text(form, "next"), "/schedule"), "error", str(e))
+    return back(request, local_path(_text(form, "next"), "/schedule"), "ok", "Schedule updated.")
 
 
 @router.post("/schedule/hold")
@@ -264,7 +272,7 @@ async def settings_page(request: Request) -> HTMLResponse:
 async def save_settings(request: Request) -> Response:
     form = await request.form()
     changes = changes_from_form(form, panel_of(request).store.get())
-    return _change_settings(request, changes, "/settings", "Settings saved.")
+    return await _change_settings(request, changes, "/settings", "Settings saved.")
 
 
 @router.get("/settings/export")
@@ -282,7 +290,7 @@ async def import_settings(request: Request) -> Response:
         data = yamlio.load(_text(form, "yaml"))
         if not isinstance(data, dict):
             raise SettingsError("the YAML must be a mapping")
-        panel.store.replace(data, user.name)
+        await asyncio.to_thread(panel.store.replace, data, user.name)
     except (SettingsError, ValueError) as e:
         return back(request, "/settings", "error", f"Not imported: {e}")
     return back(request, "/settings", "ok", "Settings imported.")

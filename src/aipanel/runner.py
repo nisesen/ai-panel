@@ -1,19 +1,25 @@
 """The runner: one action at a time, a cooldown between power actions, a step log the page
 shows as it grows, and an audit record of who started what and how it ended.
+
+How each action and power action last ended is kept in the state directory (`runner.json`), so
+the failure metrics and the emergency actions' gate survive a restart.
 """
 
 import asyncio
 import contextlib
-import itertools
+import json
 import logging
+import secrets
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from aipanel import files
 from aipanel.actions import registry
 from aipanel.actions.base import (
     Action,
@@ -83,6 +89,8 @@ class Runner:
         clock: Clock,
         audit: Audit,
         metrics: PanelMetrics,
+        state: Path | None = None,
+        next_on: Callable[[datetime], datetime | None] = lambda now: None,
     ) -> None:
         self.site = site
         self.settings = settings
@@ -91,13 +99,31 @@ class Runner:
         self.clock = clock
         self.audit = audit
         self.metrics = metrics
+        self.state = state
+        self.next_on = next_on
         self.current: Job | None = None
         self.history: deque[Job] = deque(maxlen=20)
-        self.last_failed: str | None = None
+        self.last_failed: str | None = None  # the last power action, while it failed
+        self.results: dict[str, dict[str, Any]] = {}  # "action|actor" -> {ok, at}
         self._starting = False
         self._last_power: datetime | None = None
         self._task: asyncio.Task[None] | None = None
-        self._ids = itertools.count(1)
+        self._restore()
+
+    def _restore(self) -> None:
+        if self.state is None or not self.state.exists():
+            return
+        try:
+            saved = json.loads(self.state.read_text())
+            self.last_failed = saved.get("last_failed")
+            self.results = dict(saved.get("results") or {})
+        except (OSError, ValueError, AttributeError) as e:
+            log.error("runner state %s unreadable: %s", self.state, e)
+        for key, result in self.results.items():
+            action, _, actor = key.partition("|")
+            labels = {"action": action, "actor": actor}
+            self.metrics.set("aipanel_action_last_success", 1 if result.get("ok") else 0, labels)
+            self.metrics.set("aipanel_action_last_timestamp", float(result.get("at", 0)), labels)
 
     @property
     def busy(self) -> bool:
@@ -129,7 +155,7 @@ class Runner:
         site, settings = self.site(), self.settings()
         action = registry.get(name)
         if action is None or not site.action_enabled(name):
-            raise Refused(f"no action {name!r} on this panel")
+            raise Refused("no such action on this panel")
         params = action.parse(raw, site)
         if not confirmed(action, confirmation, site):
             what = f"type {site.site.name!r}" if action.confirm == Confirm.TYPED else "confirm"
@@ -149,7 +175,7 @@ class Runner:
         try:
             snapshot = await self.poller.refresh()
             job = Job(
-                id=str(next(self._ids)),
+                id=secrets.token_hex(4),
                 action=name,
                 label=action.label,
                 actor=actor,
@@ -169,6 +195,7 @@ class Runner:
                 dry_run=site.actions.dry_run,
                 force=force,
                 last_failed=self.last_failed,
+                next_on=self.next_on(now),
             )
             await action.check(ctx)
             if action.power:
@@ -199,23 +226,35 @@ class Runner:
             job.status, job.error = "failed", str(e)
         except asyncio.CancelledError:
             job.status, job.error = "failed", "interrupted: the panel stopped"
+            self._log(job, job.error)
+            self._finish(job)
             raise
         except Exception as e:
             log.exception("action %s failed", job.action)
             job.status, job.error = "failed", f"{type(e).__name__}: {e}"
-        finally:
-            self._finish(job)
+        if job.error:
+            self._log(job, job.error)
+        if job.status in ("failed", "timed_out"):
+            try:
+                await asyncio.wait_for(action.recover(ctx), 120)
+            except Exception as e:
+                ctx.log(f"warning: clean-up after the failure did not finish ({e})")
+        self._finish(job)
         with contextlib.suppress(Exception):
             await self.poller.refresh()  # the dashboard shows the new state at once
 
     def _finish(self, job: Job) -> None:
         job.finished_at = self.clock.now()
-        if job.error:
-            self._log(job, job.error)
         self.current = None
         self.history.appendleft(job)
         ok = job.status == "succeeded"
-        self.last_failed = None if ok else job.action
+        if registry.REGISTRY[job.action].power:  # only a later power action clears a failure
+            self.last_failed = None if ok else job.action
+        self.results[f"{job.action}|{job.actor}"] = {"ok": ok, "at": job.finished_at.timestamp()}
+        if self.state is not None:
+            text = json.dumps({"last_failed": self.last_failed, "results": self.results})
+            state = self.state
+            files.in_background(lambda: files.atomic_write(state, text + "\n"))
         self.audit.record(
             "action.finished",
             job.actor,
