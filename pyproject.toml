@@ -1,6 +1,6 @@
 [project]
 name = "ai-panel"
-version = "0.1.0"
+version = "0.1.1"
 description = "A small web control panel for a self-hosted GPU/LLM server: power on and off via IPMI, graceful shutdown, model switching, schedules and running cost."
 readme = "README.md"
 license = "MIT"
@@ -14,6 +14,7 @@ dependencies = [
   "pyyaml>=6.0.3",
   "httpx>=0.28.1",
   "python-multipart>=0.0.20",
+  "tzdata>=2025.2",
 ]
 
 [project.scripts]
