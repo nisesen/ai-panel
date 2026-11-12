@@ -38,11 +38,11 @@ def test_every_action_name_is_registered() -> None:
 
 async def test_power_on(panel: Panel, clock: FakeClock) -> None:
     lab(panel).bmc("off")
-    silence = await panel.backends.silences.create(clock.now() + timedelta(hours=8), "x")  # type: ignore[union-attr]
+    made = await panel.backends.silences.create(clock.now() + timedelta(hours=8), "x")  # type: ignore[union-attr]
     job = await run(panel, "power_on")
     assert job.status == "succeeded", steps(job)
     assert lab(panel).power == "on" and lab(panel).llm_healthy()
-    assert "end silence " + silence in steps(job)
+    assert len(made) == 2 and all(f"end silence {i}" in steps(job) for i in made)
     assert await panel.backends.silences.active() == []  # type: ignore[union-attr]
 
 
@@ -74,7 +74,9 @@ async def test_shutdown(panel: Panel, clock: FakeClock) -> None:
     assert lab(panel).power == "off"
     assert "llm-ctl shutdown" in steps(job)
     silences = await panel.backends.silences.active()  # type: ignore[union-attr]
-    assert len(silences) == 1 and silences[0].ends_at == job.started_at + timedelta(minutes=60)
+    assert len(silences) == 2  # the demo config has two matcher sets
+    assert all(s.ends_at == job.started_at + timedelta(minutes=60) for s in silences)
+    assert "(2 silences)" in steps(job)
 
 
 async def test_shutdown_needs_the_typed_host_name(panel: Panel) -> None:
@@ -140,8 +142,8 @@ async def test_llm_switch(panel: Panel) -> None:
     assert job.status == "succeeded", steps(job)
     assert lab(panel).model == "moe"
     calls = lab(panel).calls
-    order = [c for c in calls if c.startswith(("hermes-checks", "llm"))]
-    assert order == ["hermes-checks pause", "llm switch moe", "hermes-checks resume"]
+    order = [c for c in calls if c.startswith(("client-checks", "llm"))]
+    assert order == ["client-checks pause", "llm switch moe", "client-checks resume"]
     assert "serving: demo-moe" in steps(job)
 
 
@@ -159,8 +161,8 @@ async def test_llm_switch_times_out_and_still_resumes_the_checks(panel: Panel) -
     lab(panel).llm_never_ready = True
     job = await run(panel, "llm_switch", confirm=None, model="moe")
     assert job.status == "timed_out"
-    order = [c for c in lab(panel).calls if c.startswith(("hermes-checks", "llm"))]
-    assert order[-1] == "hermes-checks resume" and not lab(panel).checks_paused
+    order = [c for c in lab(panel).calls if c.startswith(("client-checks", "llm"))]
+    assert order[-1] == "client-checks resume" and not lab(panel).checks_paused
 
 
 async def test_llm_restart_start_stop(panel: Panel) -> None:
@@ -199,7 +201,7 @@ async def test_guest_refusals(panel: Panel) -> None:
 async def test_probe_and_client_checks(panel: Panel) -> None:
     job = await run(panel, "probe", confirm=None)
     assert job.status == "succeeded" and "gpus:" in steps(job)
-    job = await run(panel, "hermes_checks", confirm=None, op="pause")
+    job = await run(panel, "client_checks", confirm=None, op="pause")
     assert job.status == "succeeded" and lab(panel).checks_paused
 
 

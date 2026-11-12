@@ -26,10 +26,10 @@ shutdown_timeout_seconds = 120
 [shutdown]
 llm_timeout_seconds = 120           # `pct shutdown <ct> --timeout` before the host powers off
 
-# Optional: pause and resume a client's checks of the LLM (for example an agent's
-# health-check timers) around planned work. Run inside the VM with `qm guest exec`, as root, so
-# a user's timers are reached with systemctl's --machine=<user>@.
-[hermes_checks]
+# Optional: pause and resume a client's checks of the LLM (user timers in a guest VM) around
+# planned LLM stops, so a planned switch or restart does not page anyone. Run inside the VM
+# with `qm guest exec`, as root, so a user's timers are reached with systemctl's --machine=<user>@.
+[client_checks]
 vmid = 212
 pause = ["systemctl", "--user", "--machine=agent@", "stop", "llm-check.timer"]
 resume = ["systemctl", "--user", "--machine=agent@", "start", "llm-check.timer"]

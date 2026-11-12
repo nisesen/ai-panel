@@ -30,9 +30,9 @@ Editors that understand `# yaml-language-server: $schema=...` complete and check
 | `auth` | `trusted_header` with the header names and allowed groups, or `none` (DEMO only); see [security.md](security.md) |
 | `bmc` | the BMC's address, user and password references, cipher suite (`-C`), privilege (`-L`) |
 | `host` | the host agent over SSH: address, user, key, known_hosts; the guests the panel may touch; which guest runs the LLM |
-| `llm` | llama.cpp's URL and API key reference; the models (`name` as in llm-ctl's config, `match`: text in `/props` that identifies it); whether LLM actions pause a client's checks |
+| `llm` | llama.cpp's URL; its API key reference, optional ([security.md](security.md#the-llms-api-key)); the models (`name` as in llm-ctl's config, `match`: text in `/props` that identifies it); `pause_client_checks`: pause a client's checks of the LLM (user timers in a guest VM) around planned LLM stops |
 | `prometheus` | its URL; queries for the GPUs (one series per GPU) and the decode speed |
-| `alertmanager` | its URL and the matchers a planned stop silences |
+| `alertmanager` | its URL, and `silences`: the matcher sets a planned stop silences, one silence per set (below) |
 | `actions` | `enabled` (all when not given) and `dry_run` (read everything, only log changes) |
 | `cost` | the power source and the price source, each `prometheus` (a query) or `static` (watts; a time-of-use tariff) |
 | `protected_windows` | `{days, from, to, reason}`: no stop, scheduled or by hand, inside these |
@@ -50,6 +50,27 @@ end, in the site's time zone. An end at or before the start crosses midnight:
 Write times in quotes or not, as you like: the panel reads YAML with YAML 1.2's rules, so
 `on`, `off`, `yes` and `no` stay text and `23:00` stays a time (YAML 1.1 would read them as
 booleans and as the number 1380).
+
+### Silences
+
+A planned or scheduled stop silences alerts until the host should be back. Alertmanager ANDs the
+matchers inside one silence, so alerts that share no label (the host's own alerts by
+`instance`, its guests' by `node`, an alert about the LLM's API with neither) cannot share one
+silence. `alertmanager.silences` is therefore a list of matcher sets, and the panel creates one
+silence per set, all with the same end time and comment: the sets add up (OR), the matchers
+inside a set must all match (AND).
+
+```yaml
+alertmanager:
+  url: http://alertmanager.monitoring.svc:9093
+  silences:
+    - matchers: [{name: instance, value: "gpu-1.*", is_regex: true}]
+    - matchers: [{name: alertname, value: GuestDown}, {name: node, value: gpu-1}]
+    - matchers: [{name: alertname, value: LlmApiDown}]
+```
+
+When the host is back (a power on or a reboot), the panel expires every silence it made,
+recognised by `created_by` (default `ai-panel`), and never touches anyone else's.
 
 ### A static tariff
 
@@ -138,6 +159,7 @@ curl -X PATCH https://panel.example.com/api/settings \
 
 `AIPANEL_STATE_DIR` (default `/var/lib/aipanel`) holds `settings.json`, `audit.jsonl` (one
 JSON line per event, also printed to stdout), `scheduler.json` (handled boundaries, holds,
-skips) and `power.jsonl` (power changes the panel saw, for the static power source). A few
+skips), `power.jsonl` (power changes the panel saw, for the static power source) and
+`csrf.key` (mode 0600, the key of the pages' CSRF tokens, made on the first start). A few
 kilobytes; back it up like other apps' data. It is safe on NFS with one panel. When it is not
 writable, the panel still runs, read-only, and says so on every page.

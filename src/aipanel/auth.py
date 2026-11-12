@@ -7,15 +7,24 @@ port. A request without the user header, or without an allowed group, is refused
 `none`: no sign-in, accepted only in DEMO mode.
 
 Every change (POST, PUT, PATCH, DELETE) also needs a CSRF token: an HMAC of the user's name
-with a key made at startup, sent as a form field or the X-CSRF-Token header.
+with the panel's key, sent as a form field or the X-CSRF-Token header. The key is kept in the
+state directory, so pages that are open survive a restart of the panel.
 """
 
 import hashlib
 import hmac
 import ipaddress
+import logging
+import os
+import secrets
 from dataclasses import dataclass
+from pathlib import Path
 
 from aipanel.config.site import AuthConfig
+from aipanel.files import atomic_write
+
+log = logging.getLogger("aipanel.auth")
+KEY_BYTES = 32
 
 CSRF_HEADER = "X-CSRF-Token"
 CSRF_FIELD = "csrf"
@@ -63,6 +72,35 @@ def authenticate(
     if not set(groups) & set(config.allowed_groups):
         raise AuthError(403, f"{name} is not in an allowed group")
     return User(name, groups)
+
+
+def load_csrf_key(path: Path) -> bytes:
+    """The CSRF key from `path` (mode 0600), made there on the first start.
+
+    Without a writable state directory the key lives in memory only: it still protects every
+    change, but open pages need a reload after the panel restarts.
+    """
+    try:
+        key = bytes.fromhex(path.read_text().strip())
+        if len(key) >= KEY_BYTES:
+            if path.stat().st_mode & 0o077:
+                path.chmod(0o600)
+            return key
+        log.warning("CSRF key %s is too short: making a new one", path)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as e:
+        log.warning("CSRF key %s unreadable (%s): making a new one", path, e)
+    key = secrets.token_bytes(KEY_BYTES)
+    try:
+        atomic_write(path, key.hex() + "\n")  # mkstemp makes the file 0600
+        os.chmod(path, 0o600)
+    except OSError as e:
+        log.warning(
+            "CSRF key not saved (%s): kept in memory, so open pages need a reload after a restart",
+            e,
+        )
+    return key
 
 
 def csrf_token(key: bytes, user: User) -> str:

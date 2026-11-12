@@ -17,7 +17,8 @@ behind a small interface, so another kind can be added without touching the rest
 - **Actions**, one at a time and each with its steps shown live: power on, shut down, reboot,
   switch the model, restart, stop or start the LLM, start or stop a guest, a read-only probe,
   and emergency BMC commands for a host that no longer answers. Power actions need the host's
-  name typed to confirm; a planned stop silences its alerts first.
+  name typed to confirm; a planned stop silences its alerts first (one Alertmanager
+  silence per matcher set, so unrelated groups of alerts are all covered).
 - **Schedules:** power off and on at set times to save power, with catch-up after the panel was
   down, holds ("keep it on until Friday"), skips, waiting for busy slots, and protected windows
   (your backups) that no stop may touch.

@@ -6,19 +6,26 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 from conftest import site_config
 
+from aipanel.actions.base import ActionContext, NoParams
+from aipanel.backends import Backends
 from aipanel.backends.agent import SshAgent
+from aipanel.backends.demo import DemoAgent, DemoLab, DemoLlm, DemoPower
 from aipanel.backends.llm import LlamaCpp
 from aipanel.backends.metrics import Prometheus
 from aipanel.backends.power import IpmiPower, parse_sdr
 from aipanel.backends.process import CommandTimeout, Result, run
 from aipanel.backends.protocols import BackendError, Unreachable
 from aipanel.backends.silences import Alertmanager
-from aipanel.config.site import BmcConfig
+from aipanel.clock import SystemClock
+from aipanel.config.settings import Settings
+from aipanel.config.site import AlertmanagerConfig, BmcConfig
+from aipanel.poller import Snapshot
 
 pytestmark = pytest.mark.anyio
 SITE = site_config()
@@ -195,42 +202,102 @@ async def test_prometheus() -> None:
         await prom.query_range("bad(", start, end, 300)
 
 
-async def test_alertmanager() -> None:
-    posted: list[dict[str, object]] = []
-    deleted: list[str] = []
+class FakeAlertmanager:
+    """Alertmanager's silences API, with state: someone else's silence and an expired one."""
 
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
-            posted.append(json.loads(request.content))
-            return httpx.Response(200, json={"silenceID": "abc"})
-        if request.method == "DELETE":
-            deleted.append(request.url.path)
-            return httpx.Response(200)
-        silences = [
-            {
-                "id": "abc",
-                "createdBy": "ai-panel",
-                "status": {"state": "active"},
-                "endsAt": "2026-01-01T08:00:00Z",
-                "comment": "x",
-            },
-            {
-                "id": "other",
+    def __init__(self) -> None:
+        self.posted: list[dict[str, Any]] = []
+        self.deleted: list[str] = []
+        self.silences: dict[str, dict[str, Any]] = {
+            "theirs": {
+                "id": "theirs",
                 "createdBy": "someone",
                 "status": {"state": "active"},
-                "endsAt": "2026-01-01T08:00:00Z",
+                "endsAt": "2026-01-02T00:00:00Z",
+                "comment": "maintenance",
             },
-        ]
-        return httpx.Response(200, json=silences)
+            "old": {
+                "id": "old",
+                "createdBy": "ai-panel",
+                "status": {"state": "expired"},
+                "endsAt": "2025-12-01T00:00:00Z",
+                "comment": "ai-panel: earlier",
+            },
+        }
 
-    am = Alertmanager(SITE.alertmanager, http(httpx.MockTransport(handle)))  # type: ignore[arg-type]
-    assert await am.create(datetime(2026, 1, 1, 8, tzinfo=UTC), "planned") == "abc"
-    assert posted[0]["matchers"] == [
-        {"name": "host", "value": "gpu-demo", "isRegex": False, "isEqual": True}
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            body = json.loads(request.content)
+            self.posted.append(body)
+            silence_id = f"s{len(self.posted)}"
+            self.silences[silence_id] = {**body, "id": silence_id, "status": {"state": "active"}}
+            return httpx.Response(200, json={"silenceID": silence_id})
+        if request.method == "DELETE":
+            silence_id = request.url.path.rsplit("/", 1)[1]
+            self.deleted.append(silence_id)
+            self.silences[silence_id]["status"] = {"state": "expired"}
+            return httpx.Response(200)
+        return httpx.Response(200, json=list(self.silences.values()))
+
+
+TWO_SETS = AlertmanagerConfig.model_validate(
+    {
+        "url": "http://alertmanager.example.com:9093",
+        "silences": [
+            {"matchers": [{"name": "instance", "value": "gpu-1.*", "is_regex": True}]},
+            {
+                "matchers": [
+                    {"name": "alertname", "value": "GuestDown"},
+                    {"name": "node", "value": "gpu-1"},
+                ]
+            },
+        ],
+    }
+)
+
+
+async def test_two_matcher_sets_make_two_silences() -> None:
+    fake = FakeAlertmanager()
+    am = Alertmanager(TWO_SETS, http(httpx.MockTransport(fake)))
+    until = datetime(2026, 1, 1, 8, tzinfo=UTC)
+    assert await am.create(until, "ai-panel: planned shutdown") == ["s1", "s2"]
+    first, second = fake.posted
+    assert first["matchers"] == [
+        {"name": "instance", "value": "gpu-1.*", "isRegex": True, "isEqual": True}
     ]
-    assert [s.id for s in await am.active()] == ["abc"]  # only the panel's own
-    await am.expire("abc")
-    assert deleted == ["/api/v2/silence/abc"]
+    assert [m["name"] for m in second["matchers"]] == ["alertname", "node"]  # ANDed in one
+    for key in ("createdBy", "comment", "endsAt"):
+        assert first[key] == second[key]
+    assert first["endsAt"] == "2026-01-01T08:00:00+00:00" and first["createdBy"] == "ai-panel"
+
+
+async def test_ending_silences_touches_only_the_panels_own() -> None:
+    fake = FakeAlertmanager()
+    site = site_config(alertmanager=TWO_SETS.model_dump(mode="json"))
+    lab = DemoLab(site, SystemClock())
+    backends = Backends(
+        DemoPower(lab),
+        DemoAgent(lab),
+        DemoLlm(lab),
+        silences=Alertmanager(site.alertmanager, http(httpx.MockTransport(fake))),  # type: ignore[arg-type]
+    )
+    steps: list[str] = []
+    ctx = ActionContext(
+        params=NoParams(),
+        actor="alice",
+        site=site,
+        settings=Settings(),
+        snapshot=Snapshot(),
+        backends=backends,
+        clock=SystemClock(),
+        log=steps.append,
+    )
+    made = await ctx.silence(datetime(2030, 1, 1, tzinfo=UTC), "planned shutdown")
+    assert made == ["s1", "s2"] and "(2 silences)" in steps[0]
+    assert all(s["comment"] == "ai-panel: planned shutdown (by alice)" for s in fake.posted)
+    await ctx.end_silences()
+    assert sorted(fake.deleted) == ["s1", "s2"]  # not someone else's, not an expired one
+    assert fake.silences["theirs"]["status"]["state"] == "active"
 
 
 def test_vendored_htmx_is_the_recorded_release() -> None:

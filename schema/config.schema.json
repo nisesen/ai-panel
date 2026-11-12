@@ -23,7 +23,7 @@
                   "guest_shutdown",
                   "guest_reboot",
                   "probe",
-                  "hermes_checks"
+                  "client_checks"
                 ],
                 "type": "string"
               },
@@ -54,13 +54,13 @@
           "title": "Url",
           "type": "string"
         },
-        "matchers": {
-          "description": "What a planned stop silences",
+        "silences": {
+          "description": "What a planned stop silences: one silence per set, so the sets add up (OR) while the matchers inside a set must all match (AND)",
           "items": {
-            "$ref": "#/$defs/Matcher"
+            "$ref": "#/$defs/SilenceSet"
           },
           "minItems": 1,
-          "title": "Matchers",
+          "title": "Silences",
           "type": "array"
         },
         "created_by": {
@@ -78,7 +78,7 @@
       },
       "required": [
         "url",
-        "matchers"
+        "silences"
       ],
       "title": "AlertmanagerConfig",
       "type": "object"
@@ -471,10 +471,10 @@
           "title": "Timeout Seconds",
           "type": "number"
         },
-        "pause_hermes_checks": {
+        "pause_client_checks": {
           "default": false,
-          "description": "Pause the client's checks (llm-ctl hermes-checks) around LLM actions",
-          "title": "Pause Hermes Checks",
+          "description": "Pause and resume a client's checks of the LLM (user timers in a guest VM, llm-ctl client-checks) around planned LLM stops, so they do not page anyone",
+          "title": "Pause Client Checks",
           "type": "boolean"
         }
       },
@@ -729,6 +729,25 @@
         }
       },
       "title": "SecretRef",
+      "type": "object"
+    },
+    "SilenceSet": {
+      "additionalProperties": false,
+      "properties": {
+        "matchers": {
+          "description": "All of them must match: Alertmanager ANDs a silence's matchers",
+          "items": {
+            "$ref": "#/$defs/Matcher"
+          },
+          "minItems": 1,
+          "title": "Matchers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "matchers"
+      ],
+      "title": "SilenceSet",
       "type": "object"
     },
     "SiteInfo": {

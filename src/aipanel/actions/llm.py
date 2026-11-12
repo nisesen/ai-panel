@@ -1,8 +1,9 @@
 """The LLM: switch the model, restart, stop or start it, through llm-ctl.
 
 Each reads the result back from llama.cpp itself (/health, and /props for which model is
-loaded): what was asked for is not proof of what is serving. A client's own checks can be
-paused around them (`llm.pause_hermes_checks`), so a planned switch does not page anyone.
+loaded): what was asked for is not proof of what is serving. A client's checks of the LLM
+(user timers in a guest VM) can be paused around them (`llm.pause_client_checks`), so a
+planned switch does not page anyone.
 """
 
 from collections.abc import Mapping
@@ -54,14 +55,14 @@ class LlmAction(Action):
         require_host_up(ctx)
 
     async def run(self, ctx: ActionContext) -> None:
-        pause = ctx.site.llm.pause_hermes_checks
+        pause = ctx.site.llm.pause_client_checks
         if pause:
-            await ctx.agent("hermes-checks", "pause")
+            await ctx.agent("client-checks", "pause")
         try:
             await self.steps(ctx)
         finally:
             if pause:
-                await ctx.agent("hermes-checks", "resume")
+                await ctx.agent("client-checks", "resume")
 
     async def steps(self, ctx: ActionContext) -> None:
         raise NotImplementedError

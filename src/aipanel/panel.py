@@ -3,12 +3,12 @@
 import asyncio
 import contextlib
 import logging
-import secrets
 from pathlib import Path
 
 import httpx
 
 from aipanel.audit import Audit
+from aipanel.auth import load_csrf_key
 from aipanel.backends import Backends
 from aipanel.backends.agent import SshAgent
 from aipanel.backends.demo import (
@@ -103,7 +103,7 @@ class Panel:
         self.cost = CostService(
             lambda: self.backends, lambda: self.site, self.store.get, self.clock
         )
-        self.csrf_key = secrets.token_bytes(32)
+        self.csrf_key = load_csrf_key(state_dir / "csrf.key")
         self.flash: dict[str, tuple[str, str]] = {}  # user -> (kind, message) for the next page
         self._tasks: list[asyncio.Task[None]] = []
         self.update_status_metrics()
@@ -123,7 +123,9 @@ class Panel:
                 DemoAgent(self.lab),
                 DemoLlm(self.lab),
                 metrics,
-                DemoSilences(self.clock),
+                DemoSilences(
+                    self.clock, len(site.alertmanager.silences) if site.alertmanager else 1
+                ),
                 power_source,
                 price_source,
             )

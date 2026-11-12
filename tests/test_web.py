@@ -1,15 +1,18 @@
 """The pages and the API through HTTP: sign-in by trusted headers (no header, no access), the
 CSRF token on every change, and the forms."""
 
+import logging
 import re
+import stat
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 import pytest
 from conftest import MakePanel, site_config
 
 from aipanel.app import create_app, create_ops_app
-from aipanel.auth import AuthError, authenticate
+from aipanel.auth import AuthError, User, authenticate, csrf_token, load_csrf_key
 from aipanel.config.site import AuthConfig
 from aipanel.panel import Panel
 
@@ -106,6 +109,37 @@ async def test_changes_need_the_csrf_token(secured: Panel) -> None:
         assert response.status_code == 303
     async with client(secured, {**ALICE, "X-Forwarded-User": "eve"}) as c:  # someone else's token
         assert (await c.post("/actions/probe", data={"csrf": token})).status_code == 403
+
+
+def test_the_csrf_key_survives_a_restart(make_panel: MakePanel, tmp_path: Path) -> None:
+    first = make_panel()
+    key = first.state_dir / "csrf.key"
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600 and len(key.read_text().strip()) == 64
+    again = make_panel()  # a restart: same state directory
+    user = User("alice")
+    assert csrf_token(again.csrf_key, user) == csrf_token(first.csrf_key, user)
+
+
+def test_a_broken_csrf_key_is_replaced(tmp_path: Path) -> None:
+    path = tmp_path / "csrf.key"
+    path.write_text("not hex\n")
+    key = load_csrf_key(path)
+    assert path.read_text().strip() == key.hex() and stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_csrf_key_in_memory_when_the_state_is_read_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    directory = tmp_path / "ro"
+    directory.mkdir()
+    directory.chmod(0o500)
+    try:
+        with caplog.at_level(logging.WARNING, logger="aipanel.auth"):
+            one, two = load_csrf_key(directory / "csrf.key"), load_csrf_key(directory / "csrf.key")
+    finally:
+        directory.chmod(0o700)
+    assert len(one) == 32 and one != two and not (directory / "csrf.key").exists()
+    assert "kept in memory" in caplog.text
 
 
 # Forms

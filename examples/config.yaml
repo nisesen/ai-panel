@@ -49,7 +49,7 @@ llm:
   models:                            # names as in llm-ctl's config; match: text in /props
     - {name: dense, label: "Dense 32B", match: "32B"}
     - {name: moe, label: "MoE 30B-A3B", match: "30B"}
-  pause_hermes_checks: true
+  pause_client_checks: true
 
 prometheus:
   url: http://prometheus.monitoring.svc:9090
@@ -62,8 +62,16 @@ prometheus:
 
 alertmanager:
   url: http://alertmanager.monitoring.svc:9093
-  matchers:                          # what a planned or scheduled stop silences
-    - {name: instance, value: "gpu-1.*", is_regex: true}
+  # What a planned or scheduled stop silences: one silence per set. Alertmanager ANDs the
+  # matchers inside a silence, so each group of alerts that shares no label gets its own set.
+  silences:
+    - matchers:                      # the host's own alerts
+        - {name: instance, value: "gpu-1.*", is_regex: true}
+    - matchers:                      # its guests, alerted by the hypervisor's node label
+        - {name: alertname, value: GuestDown}
+        - {name: node, value: gpu-1}
+    - matchers:                      # an alert about the LLM's API, with neither label
+        - {name: alertname, value: LlmApiDown}
 
 actions:
   dry_run: false                     # true: read everything, only log what would change

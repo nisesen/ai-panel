@@ -63,7 +63,7 @@ def demo_site_config() -> SiteConfig:
                     {"name": "dense", "label": "Dense 32B", "match": "dense"},
                     {"name": "moe", "label": "MoE 30B-A3B", "match": "moe"},
                 ],
-                "pause_hermes_checks": True,
+                "pause_client_checks": True,
             },
             "prometheus": {
                 "url": "http://prometheus.example.com:9090",
@@ -77,7 +77,10 @@ def demo_site_config() -> SiteConfig:
             },
             "alertmanager": {
                 "url": "http://alertmanager.example.com:9093",
-                "matchers": [{"name": "host", "value": "gpu-demo"}],
+                "silences": [
+                    {"matchers": [{"name": "instance", "value": "gpu-demo.*", "is_regex": True}]},
+                    {"matchers": [{"name": "alertname", "value": "LlmDown"}]},
+                ],
             },
             "cost": {
                 "power": {"source": "prometheus", "query": "demo_host_power_watts"},
@@ -262,9 +265,9 @@ class DemoLab:
             case ["probe"]:
                 gpus = [f"{g['index']}, {g['temperature']} C, {g['power']} W" for g in self.gpus()]
                 return {"ok": True, "verb": "probe", "gpus": gpus, "health": self.llm_healthy()}
-            case ["hermes-checks", "pause" | "resume" as op]:
+            case ["client-checks", "pause" | "resume" as op]:
                 self.checks_paused = op == "pause"
-                return {"ok": True, "verb": "hermes-checks", "op": op}
+                return {"ok": True, "verb": "client-checks", "op": op}
         raise BackendError(f"host agent: refused {' '.join(args)!r}")
 
     def _guest(self, guest_id: int, op: str) -> dict[str, Any]:
@@ -458,15 +461,17 @@ class DemoMetrics:
 
 
 class DemoSilences:
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: Clock, sets: int = 1) -> None:
         self.clock = clock
+        self.sets = sets
         self.silences: dict[str, Silence] = {}
         self._ids = itertools.count(1)
 
-    async def create(self, until: datetime, comment: str) -> str:
-        silence_id = f"demo-{next(self._ids)}"
-        self.silences[silence_id] = Silence(silence_id, until, comment)
-        return silence_id
+    async def create(self, until: datetime, comment: str) -> list[str]:
+        ids = [f"demo-{next(self._ids)}" for _ in range(self.sets)]
+        for silence_id in ids:
+            self.silences[silence_id] = Silence(silence_id, until, comment)
+        return ids
 
     async def active(self) -> list[Silence]:
         now = self.clock.now()

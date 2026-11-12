@@ -108,18 +108,23 @@ class ActionContext:
         timeout = min(30, self.settings.timeouts.command_seconds)
         return await self.backends.agent.call(["status"], timeout)
 
-    async def silence(self, until: datetime, why: str) -> str | None:
-        if self.backends.silences is None:
+    async def silence(self, until: datetime, why: str) -> list[str]:
+        """One silence per matcher set of the site config, all ending at `until`."""
+        if self.backends.silences is None or self.site.alertmanager is None:
             self.log("no Alertmanager configured: nothing silenced")
-            return None
+            return []
         silences = self.backends.silences
         comment = f"ai-panel: {why} (by {self.actor})"
         local = until.astimezone(self.site.site.tz).strftime("%a %H:%M")
-        return await self.do(
-            f"silence alerts until {local}", lambda: silences.create(until, comment)
+        sets = len(self.site.alertmanager.silences)
+        ids = await self.do(
+            f"silence alerts until {local} ({sets} silence{'s' if sets > 1 else ''})",
+            lambda: silences.create(until, comment),
         )
+        return ids or []
 
     async def end_silences(self) -> None:
+        """Expire every silence the panel made (its createdBy), and only those."""
         if self.backends.silences is None:
             return
         silences = self.backends.silences

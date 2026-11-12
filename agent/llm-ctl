@@ -11,7 +11,7 @@ without a shell, answers one JSON object, and logs each call to syslog (tag llm-
     llm restart|stop|start         the active unit; all units; the default model's unit
     guest <id> start|shutdown|reboot
     probe                          read-only health: GPUs, the LLM, an optional probe command
-    hermes-checks pause|resume     a client's checks of the LLM, inside its VM
+    client-checks pause|resume     a client's checks of the LLM (user timers in a guest VM)
 
 Run by the unprivileged account, it checks the verb and runs itself again through sudo with
 the checked words as arguments; as root it checks them again and acts.
@@ -122,13 +122,13 @@ class Config:
         self.llm_stop_timeout = int((data.get("shutdown") or {}).get("llm_timeout_seconds", 120))
         self.node = str(data.get("node") or socket.gethostname().split(".")[0])
 
-        checks = data.get("hermes_checks")
+        checks = data.get("client_checks")
         self.checks = None
         if checks:
             self.checks = {
                 "vmid": str(int(checks["vmid"])),
-                "pause": _argv(checks["pause"], "hermes_checks.pause"),
-                "resume": _argv(checks["resume"], "hermes_checks.resume"),
+                "pause": _argv(checks["pause"], "client_checks.pause"),
+                "resume": _argv(checks["resume"], "client_checks.resume"),
             }
         probe = data.get("probe") or {}
         self.probe_command = (
@@ -167,9 +167,9 @@ def parse(words, config):
         if not verb[1].isdigit() or int(verb[1]) not in config.guests:
             raise Refused("guest %s is not allowed" % verb[1])
         return verb
-    if len(verb) == 2 and verb[0] == "hermes-checks" and verb[1] in ("pause", "resume"):
+    if len(verb) == 2 and verb[0] == "client-checks" and verb[1] in ("pause", "resume"):
         if config.checks is None:
-            raise Refused("hermes-checks is not configured")
+            raise Refused("client-checks is not configured")
         return verb
     raise Refused("unknown command %r" % " ".join(words)[:80])
 
@@ -434,7 +434,7 @@ class Agent:
         except (ValueError, AttributeError):
             exitcode = 1
         if exitcode != 0:
-            raise Failed("hermes-checks %s: exit %d inside VM %s" % (op, exitcode, checks["vmid"]))
+            raise Failed("client-checks %s: exit %d inside VM %s" % (op, exitcode, checks["vmid"]))
         return {"op": op, "vmid": int(checks["vmid"])}
 
     def act(self, verb):
@@ -453,7 +453,7 @@ class Agent:
                 return self.do_llm(op)
             case ("guest", guest_id, op):
                 return self.do_guest(int(guest_id), op)
-            case ("hermes-checks", op):
+            case ("client-checks", op):
                 return self.do_checks(op)
         raise Refused("unknown command")
 

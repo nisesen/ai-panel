@@ -39,7 +39,7 @@ ActionName = Literal[
     "guest_shutdown",
     "guest_reboot",
     "probe",
-    "hermes_checks",
+    "client_checks",
 ]
 
 
@@ -178,8 +178,10 @@ class LlmConfig(Model):
     api_key: SecretRef | None = None
     models: list[LlmModel] = Field(default_factory=list)
     timeout_seconds: float = Field(5, gt=0, le=60)
-    pause_hermes_checks: bool = Field(
-        False, description="Pause the client's checks (llm-ctl hermes-checks) around LLM actions"
+    pause_client_checks: bool = Field(
+        False,
+        description="Pause and resume a client's checks of the LLM (user timers in a guest VM, "
+        "llm-ctl client-checks) around planned LLM stops, so they do not page anyone",
     )
 
 
@@ -205,9 +207,19 @@ class Matcher(Model):
     is_equal: bool = True
 
 
+class SilenceSet(Model):
+    matchers: list[Matcher] = Field(
+        min_length=1, description="All of them must match: Alertmanager ANDs a silence's matchers"
+    )
+
+
 class AlertmanagerConfig(Model):
     url: str
-    matchers: list[Matcher] = Field(min_length=1, description="What a planned stop silences")
+    silences: list[SilenceSet] = Field(
+        min_length=1,
+        description="What a planned stop silences: one silence per set, so the sets add up (OR) "
+        "while the matchers inside a set must all match (AND)",
+    )
     created_by: str = "ai-panel"
     timeout_seconds: float = Field(10, gt=0, le=60)
 

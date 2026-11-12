@@ -20,7 +20,7 @@ to syslog with the tag `llm-ctl`.
 | `llm restart`, `llm stop`, `llm start` | the active unit; every model's unit; the default model's unit |
 | `guest <id> start\|shutdown\|reboot` | `pct` or `qm` (by the guest's type), only for ids in `guests.allowed` |
 | `probe` | `nvidia-smi --query-gpu=...`, the LLM's state, and your own probe command if configured |
-| `hermes-checks pause\|resume` | the configured command inside the client's VM, through `qm guest exec` |
+| `client-checks pause\|resume` | pause or resume a client's checks of the LLM (user timers in a guest VM) around planned LLM stops: the configured command, inside that VM, through `qm guest exec` |
 
 Anything else, an unknown model or guest, an extra word, or a character outside
 `A-Z a-z 0-9 . _ -`, is refused with `{"ok": false, "error": ...}` and exit code 2. A verb that

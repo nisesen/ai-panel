@@ -89,9 +89,12 @@ class Metrics(Protocol):
 
 
 class Silences(Protocol):
-    """Alert silences for a planned stop, using the matchers of the site config."""
+    """Alert silences for a planned stop: one per matcher set of the site config."""
 
-    async def create(self, until: datetime, comment: str) -> str: ...
+    async def create(self, until: datetime, comment: str) -> list[str]:
+        """One silence per set, all ending at `until`; their ids."""
+        ...
+
     async def active(self) -> list[Silence]:
         """The panel's own silences that are in force."""
         ...

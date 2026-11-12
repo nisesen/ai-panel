@@ -9,6 +9,7 @@ what it protects, how, and what it relies on you to do.
 | --- | --- | --- |
 | The BMC's credentials | a Secret the panel reads (a file or an environment variable) | an **Operator** account: power control, nothing else; never printed or logged; ipmitool reads the password from a file (`-f`) or its environment (`-E`), never from its command line |
 | Power and the host's services | the panel's actions | sign-in through your proxy, an allowed group, a CSRF token on every change, the host's name typed for power actions, one action at a time, a cooldown between power actions, an audit log |
+| The LLM's API key (optional) | a Secret the panel reads (a file or an environment variable) | sent only to `llm.url`, as a bearer header; never shown, logged or put on a command line |
 | The host | SSH as `llmctl` | a key that may run only `llm-ctl`, only from your nodes; `llm-ctl` accepts fixed verbs with arguments from lists, never a shell ([agent.md](agent.md)) |
 | Where the panel points | `config.yaml` | owned by git: nothing in the panel can change it |
 | The schedule | `settings.json` | the same sign-in; every change validated and audited (who, from, to) |
@@ -40,7 +41,12 @@ auth:
 - `auth.mode: none` exists for DEMO mode only; the panel refuses to start with it otherwise.
 
 Every change (POST, PUT, PATCH, DELETE) also needs a CSRF token, bound to the signed-in user
-and to the running process: a page from another site cannot make the browser start an action.
+and to the panel's key: a page from another site cannot make the browser start an action. The
+key is made on the first start and kept in the state directory (`csrf.key`, mode 0600), so
+open pages keep working after a restart; with a read-only state directory it lives in memory
+only (the panel logs a warning) and pages need a reload after a restart. Whoever can read the state
+directory could make valid tokens (they would still need to pass the sign-in), so keep it
+private to the panel.
 Pages send a strict Content-Security-Policy (scripts and styles from the panel only; htmx is
 configured not to evaluate code), `X-Content-Type-Options: nosniff` and no-store caching.
 
@@ -55,6 +61,31 @@ configured not to evaluate code), `X-Content-Type-Options: nosniff` and no-store
 - The panel uses the BMC to switch the host **on**, to confirm that it went **off**, and, only
   in the emergency actions, to cut or reset power. A planned stop goes through the host agent:
   on some hardware a BMC power cycle hard-kills the guests and cannot clear latched faults.
+
+## The LLM's API key
+
+When llama.cpp runs with `--api-key`, every endpoint but `/health` and `/v1/models` needs the
+key, including the two the panel reads: `/props` (which model is really loaded: the dashboard
+shows it, and an LLM action reads it back to confirm a switch) and `/slots` (busy slots: the
+scheduler waits for them before a stop, and the shutdown form warns about them). So the panel
+gets the key, named in the site config and never written there:
+
+```yaml
+llm:
+  url: https://llm.example.com
+  api_key: {file: /secrets/llm/api-key}      # or {env: LLM_API_KEY}
+```
+
+- It is **optional**: leave `api_key` out when your server has no key. With a key on the server
+  and none in the panel, those reads fail: the model shows as unknown, a switch cannot be
+  confirmed, and the scheduler cannot see busy slots.
+- It is read from the file or the variable at each request (a rotated key is picked up without
+  a restart), sent only to `llm.url` in the `Authorization` header, and never shown on a page,
+  in the API, in the logs or in the audit log.
+- llama.cpp has one key for everything, so it also lets its holder use the LLM. That is the cost
+  of reading `/props` and `/slots`; the panel itself only reads.
+- The host agent reads `/props` inside the LLM's container with the key file there
+  (`llm.api_key_file` in its own config), and passes it to curl on stdin.
 
 ## The host agent
 

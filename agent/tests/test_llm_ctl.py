@@ -32,7 +32,7 @@ unit = "llama-server"
 unit = "llama-moe"
 [guests]
 allowed = [210, 211, 212]
-[hermes_checks]
+[client_checks]
 vmid = 212
 pause = ["systemctl", "--user", "--machine=agent@", "stop", "llm-check.timer"]
 resume = ["systemctl", "--user", "--machine=agent@", "start", "llm-check.timer"]
@@ -140,7 +140,7 @@ def config(env):
         "llm start",
         "guest 211 shutdown",
         "guest 212 reboot",
-        "hermes-checks pause",
+        "client-checks pause",
     ],
 )
 def test_accepts_the_listed_verbs(config, words):
@@ -171,11 +171,11 @@ def test_refuses_everything_else(config, words, reason):
         llm_ctl.parse(words.split(), config)
 
 
-def test_hermes_checks_refused_when_not_configured(tmp_path):
+def test_client_checks_refused_when_not_configured(tmp_path):
     path = tmp_path / "c.toml"
-    path.write_text(CONFIG.split("[hermes_checks]")[0])
+    path.write_text(CONFIG.split("[client_checks]")[0])
     with pytest.raises(llm_ctl.Refused, match="not configured"):
-        llm_ctl.parse(["hermes-checks", "pause"], llm_ctl.load_config(path))
+        llm_ctl.parse(["client-checks", "pause"], llm_ctl.load_config(path))
 
 
 def test_refusal_answers_json_logs_and_exits_2(env):
@@ -348,9 +348,9 @@ def test_probe(env):
     assert code == 0 and len(reply["gpus"]) == 2 and reply["gpus"][1]["temperature.gpu"] == "39"
 
 
-def test_hermes_checks(env):
+def test_client_checks(env):
     runner = FakeRunner({("/usr/sbin/qm", "guest", "exec"): (0, '{"exitcode": 0}')})
-    code, _reply, _, _ = call(env, "hermes-checks pause", runner)
+    code, _reply, _, _ = call(env, "client-checks pause", runner)
     assert code == 0
     assert runner.calls[-1] == [
         "/usr/sbin/qm",
@@ -368,15 +368,15 @@ def test_hermes_checks(env):
     ]
 
 
-def test_hermes_checks_failing_inside_the_vm(env):
+def test_client_checks_failing_inside_the_vm(env):
     runner = FakeRunner({("/usr/sbin/qm", "guest", "exec"): (0, '{"exitcode": 1}')})
-    code, reply, _, _ = call(env, "hermes-checks resume", runner)
+    code, reply, _, _ = call(env, "client-checks resume", runner)
     assert code == 1 and "exit 1" in reply["error"]
 
 
 def test_never_a_shell(env):
     runner = FakeRunner({("/usr/sbin/qm", "guest", "exec"): (0, '{"exitcode": 0}')})
-    for words in ("status", "llm switch moe", "guest 211 reboot", "probe", "hermes-checks pause"):
+    for words in ("status", "llm switch moe", "guest 211 reboot", "probe", "client-checks pause"):
         call(env, words, runner)
     for argv in runner.calls:
         assert argv[0] not in ("sh", "bash", "/bin/sh", "/bin/bash") and "-c" not in argv

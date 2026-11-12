@@ -34,8 +34,8 @@ class ChecksParams(BaseModel):
 
 
 @register
-class HermesChecks(Action):
-    name = "hermes_checks"
+class ClientChecks(Action):
+    name = "client_checks"
     label = "Client checks"
     group = "maintenance"
     params = ChecksParams
@@ -44,4 +44,4 @@ class HermesChecks(Action):
         require_host_up(ctx)
 
     async def run(self, ctx: ActionContext) -> None:
-        await ctx.agent("hermes-checks", ctx.params.op)
+        await ctx.agent("client-checks", ctx.params.op)
