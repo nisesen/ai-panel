@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-12
+
 ### Added
 
 - A web panel for one GPU/LLM host: the dashboard (power, host, LLM, GPUs, guests, silences,
