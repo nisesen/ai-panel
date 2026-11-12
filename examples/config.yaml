@@ -1,0 +1,86 @@
+# yaml-language-server: $schema=../schema/config.schema.json
+#
+# ai-panel's site config: where the panel connects and what it may do. Owned by git and
+# read-only to the panel, which reloads it when it changes (and keeps the last good version
+# when a change does not validate). Check a change with `aipanel validate config.yaml`.
+#
+# Secrets are never written here: each names an environment variable (env) or a file (file).
+# Addresses below are documentation examples (192.0.2.0/24, example.com).
+
+site:
+  name: gpu-1                        # typed to confirm power and emergency actions
+  timezone: Europe/Amsterdam         # schedules, tariffs and the page use this time zone
+  links:
+    - {label: Dashboard, url: "https://dashboard.example.com"}
+    - {label: Grafana, url: "https://grafana.example.com"}
+  emergency_warning: >-
+    Cuts power like pulling the plug: the LLM's container dies without shutting down. Describe
+    your hardware's own risks here (for example, faults a power cycle does not clear).
+
+auth:
+  mode: trusted_header               # the proxy in front signs people in (e.g. Authentik, Authelia)
+  user_header: X-authentik-username
+  groups_header: X-authentik-groups
+  groups_separator: "|"
+  allowed_groups: [admins]
+  # trusted_proxies: [198.51.100.0/24]   # optional: refuse requests from anywhere else
+
+bmc:
+  host: 192.0.2.10
+  username: {env: BMC_USER}
+  password: {file: /secrets/bmc/password}
+  cipher_suite: 3
+  privilege: OPERATOR                # an Operator account: power control, nothing else
+
+host:
+  address: 192.0.2.20
+  user: llmctl                       # may run only llm-ctl (see docs/agent.md)
+  key_file: /secrets/ssh/id_ed25519
+  known_hosts_file: /secrets/ssh/known_hosts
+  guests:
+    - {id: 210, name: llm}
+    - {id: 211, name: monitor}
+    - {id: 212, name: chat}
+  llm_guest: 210
+
+llm:
+  url: https://llm.example.com
+  api_key: {file: /secrets/llm/api-key}
+  models:                            # names as in llm-ctl's config; match: text in /props
+    - {name: dense, label: "Dense 32B", match: "32B"}
+    - {name: moe, label: "MoE 30B-A3B", match: "30B"}
+  pause_hermes_checks: true
+
+prometheus:
+  url: http://prometheus.monitoring.svc:9090
+  gpus:                              # one series per GPU, told apart by `label`
+    label: gpu
+    temperature: llmdash_gpu_temp_celsius
+    power: llmdash_gpu_power_watts
+    memory_used: llmdash_gpu_memory_used_bytes
+  decode_tokens_per_second: llmdash_decode_tokens_per_second
+
+alertmanager:
+  url: http://alertmanager.monitoring.svc:9093
+  matchers:                          # what a planned or scheduled stop silences
+    - {name: instance, value: "gpu-1.*", is_regex: true}
+
+actions:
+  dry_run: false                     # true: read everything, only log what would change
+  # enabled: [power_on, shutdown, reboot, llm_switch, llm_restart, probe]   # default: all
+
+cost:
+  power:
+    source: prometheus
+    query: sum(node_power_watts{instance=~"gpu-1.*"})
+  price:
+    source: static
+    tariff:
+      currency: EUR
+      periods: {peak: 0.38, off-peak: 0.24}
+      default: off-peak
+      windows:
+        - {days: [mon, tue, wed, thu, fri], from: "07:00", to: "23:00", period: peak}
+
+protected_windows:                   # no stop inside these, scheduled or by hand
+  - {days: [mon, tue, wed, thu, fri, sat, sun], from: "02:00", to: "05:00", reason: nightly backups}

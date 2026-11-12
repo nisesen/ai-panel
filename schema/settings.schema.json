@@ -1,0 +1,323 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "CooldownSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "power_seconds": {
+          "default": 60,
+          "description": "Between two power actions",
+          "maximum": 3600,
+          "minimum": 0,
+          "title": "Power Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "CooldownSettings",
+      "type": "object"
+    },
+    "CostSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "standby_watts": {
+          "default": 15,
+          "description": "What the host draws while off (BMC on): measure it",
+          "maximum": 2000,
+          "minimum": 0,
+          "title": "Standby Watts",
+          "type": "number"
+        },
+        "idle_watts": {
+          "anyOf": [
+            {
+              "maximum": 5000,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What it draws while on and idle; empty: the 10th percentile of 7 days",
+          "title": "Idle Watts"
+        }
+      },
+      "title": "CostSettings",
+      "type": "object"
+    },
+    "DisplaySettings": {
+      "additionalProperties": false,
+      "properties": {
+        "theme": {
+          "default": "auto",
+          "description": "Page colours",
+          "enum": [
+            "auto",
+            "light",
+            "dark"
+          ],
+          "title": "Theme",
+          "type": "string"
+        },
+        "refresh_seconds": {
+          "default": 5,
+          "description": "Refresh the dashboard every",
+          "maximum": 60,
+          "minimum": 2,
+          "title": "Refresh Seconds",
+          "type": "integer"
+        },
+        "activity_rows": {
+          "default": 200,
+          "description": "Rows on the activity page",
+          "maximum": 2000,
+          "minimum": 10,
+          "title": "Activity Rows",
+          "type": "integer"
+        }
+      },
+      "title": "DisplaySettings",
+      "type": "object"
+    },
+    "PollSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "interval_seconds": {
+          "default": 15,
+          "description": "Read the host's state every",
+          "maximum": 300,
+          "minimum": 5,
+          "title": "Interval Seconds",
+          "type": "integer"
+        },
+        "bmc_interval_seconds": {
+          "default": 60,
+          "description": "Ask the BMC every (more often while the host is down)",
+          "maximum": 3600,
+          "minimum": 10,
+          "title": "Bmc Interval Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "PollSettings",
+      "type": "object"
+    },
+    "ScheduleRule": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "days": {
+          "description": "The days the off time falls on",
+          "items": {
+            "enum": [
+              "mon",
+              "tue",
+              "wed",
+              "thu",
+              "fri",
+              "sat",
+              "sun"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Days",
+          "type": "array"
+        },
+        "off": {
+          "description": "Power off at (site time)",
+          "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "Off",
+          "type": "string"
+        },
+        "on": {
+          "description": "Power on at; before the off time means the next day",
+          "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "On",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "days",
+        "off",
+        "on"
+      ],
+      "title": "ScheduleRule",
+      "type": "object"
+    },
+    "ScheduleSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Run the schedule rules",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/ScheduleRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "catch_up_minutes": {
+          "default": 30,
+          "description": "Act on a boundary missed while the panel was down, up to",
+          "maximum": 720,
+          "minimum": 0,
+          "title": "Catch Up Minutes",
+          "type": "integer"
+        },
+        "busy_retry_minutes": {
+          "default": 5,
+          "description": "When busy at an off time, try again every",
+          "maximum": 60,
+          "minimum": 1,
+          "title": "Busy Retry Minutes",
+          "type": "integer"
+        },
+        "busy_grace_minutes": {
+          "default": 30,
+          "description": "When busy at an off time, keep trying for",
+          "maximum": 720,
+          "minimum": 0,
+          "title": "Busy Grace Minutes",
+          "type": "integer"
+        },
+        "force_after_grace": {
+          "default": false,
+          "description": "Still busy after that: shut down anyway (otherwise skip)",
+          "title": "Force After Grace",
+          "type": "boolean"
+        },
+        "boot_grace_minutes": {
+          "default": 20,
+          "description": "Silences of a scheduled stop end this long after the on time",
+          "maximum": 240,
+          "minimum": 0,
+          "title": "Boot Grace Minutes",
+          "type": "integer"
+        }
+      },
+      "title": "ScheduleSettings",
+      "type": "object"
+    },
+    "SilenceSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "shutdown_minutes": {
+          "default": 720,
+          "description": "A manual shutdown silences alerts for (default)",
+          "maximum": 10080,
+          "minimum": 0,
+          "title": "Shutdown Minutes",
+          "type": "integer"
+        },
+        "reboot_minutes": {
+          "default": 30,
+          "description": "A reboot silences alerts for",
+          "maximum": 720,
+          "minimum": 0,
+          "title": "Reboot Minutes",
+          "type": "integer"
+        },
+        "emergency_minutes": {
+          "default": 120,
+          "description": "An emergency action silences alerts for",
+          "maximum": 10080,
+          "minimum": 0,
+          "title": "Emergency Minutes",
+          "type": "integer"
+        }
+      },
+      "title": "SilenceSettings",
+      "type": "object"
+    },
+    "TimeoutSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "command_seconds": {
+          "default": 120,
+          "description": "One llm-ctl command, at most",
+          "maximum": 900,
+          "minimum": 10,
+          "title": "Command Seconds",
+          "type": "integer"
+        },
+        "boot_seconds": {
+          "default": 900,
+          "description": "Power on or reboot until the host answers SSH",
+          "maximum": 3600,
+          "minimum": 60,
+          "title": "Boot Seconds",
+          "type": "integer"
+        },
+        "llm_ready_seconds": {
+          "default": 900,
+          "description": "Until the LLM reports healthy after a start or switch",
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Llm Ready Seconds",
+          "type": "integer"
+        },
+        "shutdown_seconds": {
+          "default": 600,
+          "description": "A shutdown until the BMC reports power off",
+          "maximum": 3600,
+          "minimum": 60,
+          "title": "Shutdown Seconds",
+          "type": "integer"
+        },
+        "guest_seconds": {
+          "default": 300,
+          "description": "A guest start or stop",
+          "maximum": 1800,
+          "minimum": 30,
+          "title": "Guest Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "TimeoutSettings",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The settings: app-owned, edited by the page, the API and the CLI.",
+  "properties": {
+    "schedule": {
+      "$ref": "#/$defs/ScheduleSettings"
+    },
+    "timeouts": {
+      "$ref": "#/$defs/TimeoutSettings"
+    },
+    "cooldowns": {
+      "$ref": "#/$defs/CooldownSettings"
+    },
+    "silences": {
+      "$ref": "#/$defs/SilenceSettings"
+    },
+    "cost": {
+      "$ref": "#/$defs/CostSettings"
+    },
+    "poll": {
+      "$ref": "#/$defs/PollSettings"
+    },
+    "display": {
+      "$ref": "#/$defs/DisplaySettings"
+    }
+  },
+  "title": "Settings",
+  "type": "object"
+}

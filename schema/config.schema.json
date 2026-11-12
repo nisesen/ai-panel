@@ -1,0 +1,985 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ActionsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "power_on",
+                  "shutdown",
+                  "reboot",
+                  "emergency_soft_off",
+                  "emergency_off",
+                  "emergency_reset",
+                  "llm_switch",
+                  "llm_restart",
+                  "llm_stop",
+                  "llm_start",
+                  "guest_start",
+                  "guest_shutdown",
+                  "guest_reboot",
+                  "probe",
+                  "hermes_checks"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The actions that exist on this panel; all when not given",
+          "title": "Enabled"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Read everything for real, but only log what would be changed",
+          "title": "Dry Run",
+          "type": "boolean"
+        }
+      },
+      "title": "ActionsConfig",
+      "type": "object"
+    },
+    "AlertmanagerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "matchers": {
+          "description": "What a planned stop silences",
+          "items": {
+            "$ref": "#/$defs/Matcher"
+          },
+          "minItems": 1,
+          "title": "Matchers",
+          "type": "array"
+        },
+        "created_by": {
+          "default": "ai-panel",
+          "title": "Created By",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 10,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "url",
+        "matchers"
+      ],
+      "title": "AlertmanagerConfig",
+      "type": "object"
+    },
+    "AuthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "description": "trusted_header: a proxy you control signs people in and sets the headers. none: no sign-in at all, accepted only in DEMO mode.",
+          "enum": [
+            "trusted_header",
+            "none"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "user_header": {
+          "default": "Remote-User",
+          "title": "User Header",
+          "type": "string"
+        },
+        "groups_header": {
+          "default": "Remote-Groups",
+          "title": "Groups Header",
+          "type": "string"
+        },
+        "groups_separator": {
+          "default": ",",
+          "description": "Authentik uses '|'",
+          "minLength": 1,
+          "title": "Groups Separator",
+          "type": "string"
+        },
+        "allowed_groups": {
+          "description": "A request needs one of these groups",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Groups",
+          "type": "array"
+        },
+        "trusted_proxies": {
+          "description": "Optional: addresses or CIDRs the headers may come from; others are refused",
+          "items": {
+            "type": "string"
+          },
+          "title": "Trusted Proxies",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "AuthConfig",
+      "type": "object"
+    },
+    "BmcConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "ipmi",
+          "default": "ipmi",
+          "title": "Kind",
+          "type": "string"
+        },
+        "host": {
+          "description": "The BMC's address",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "default": 623,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "username": {
+          "$ref": "#/$defs/SecretRef"
+        },
+        "password": {
+          "$ref": "#/$defs/SecretRef"
+        },
+        "interface": {
+          "default": "lanplus",
+          "enum": [
+            "lanplus",
+            "lan"
+          ],
+          "title": "Interface",
+          "type": "string"
+        },
+        "cipher_suite": {
+          "default": 3,
+          "description": "ipmitool -C",
+          "maximum": 17,
+          "minimum": 0,
+          "title": "Cipher Suite",
+          "type": "integer"
+        },
+        "privilege": {
+          "default": "OPERATOR",
+          "description": "ipmitool -L; an Operator account can switch power, nothing else",
+          "enum": [
+            "OPERATOR",
+            "ADMINISTRATOR",
+            "USER"
+          ],
+          "title": "Privilege",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 20,
+          "exclusiveMinimum": 0,
+          "maximum": 120,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "command": {
+          "default": "ipmitool",
+          "description": "The ipmitool binary",
+          "title": "Command",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "username",
+        "password"
+      ],
+      "title": "BmcConfig",
+      "type": "object"
+    },
+    "CostConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "power": {
+          "discriminator": {
+            "mapping": {
+              "prometheus": "#/$defs/PrometheusPower",
+              "static": "#/$defs/StaticPower"
+            },
+            "propertyName": "source"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PrometheusPower"
+            },
+            {
+              "$ref": "#/$defs/StaticPower"
+            }
+          ],
+          "title": "Power"
+        },
+        "price": {
+          "discriminator": {
+            "mapping": {
+              "prometheus": "#/$defs/PrometheusPrice",
+              "static": "#/$defs/StaticPrice"
+            },
+            "propertyName": "source"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PrometheusPrice"
+            },
+            {
+              "$ref": "#/$defs/StaticPrice"
+            }
+          ],
+          "title": "Price"
+        }
+      },
+      "required": [
+        "power",
+        "price"
+      ],
+      "title": "CostConfig",
+      "type": "object"
+    },
+    "GpuQueries": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "default": "gpu",
+          "description": "The label that tells the GPUs apart",
+          "title": "Label",
+          "type": "string"
+        },
+        "temperature": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        },
+        "power": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power"
+        },
+        "memory_used": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bytes",
+          "title": "Memory Used"
+        },
+        "memory_total": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bytes",
+          "title": "Memory Total"
+        }
+      },
+      "title": "GpuQueries",
+      "type": "object"
+    },
+    "Guest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maximum": 999999999,
+          "minimum": 100,
+          "title": "Id",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "Guest",
+      "type": "object"
+    },
+    "HostConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "description": "The GPU host, reached over SSH",
+          "title": "Address",
+          "type": "string"
+        },
+        "port": {
+          "default": 22,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "user": {
+          "default": "llmctl",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$",
+          "title": "User",
+          "type": "string"
+        },
+        "key_file": {
+          "description": "The panel's private SSH key",
+          "format": "path",
+          "title": "Key File",
+          "type": "string"
+        },
+        "known_hosts_file": {
+          "description": "A known_hosts file with the host's key",
+          "format": "path",
+          "title": "Known Hosts File",
+          "type": "string"
+        },
+        "connect_timeout_seconds": {
+          "default": 10,
+          "maximum": 60,
+          "minimum": 1,
+          "title": "Connect Timeout Seconds",
+          "type": "integer"
+        },
+        "guests": {
+          "description": "Guests the panel shows and may start or stop",
+          "items": {
+            "$ref": "#/$defs/Guest"
+          },
+          "title": "Guests",
+          "type": "array"
+        },
+        "llm_guest": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The guest (container) that runs llama.cpp",
+          "title": "Llm Guest"
+        },
+        "command": {
+          "default": "ssh",
+          "description": "The ssh binary",
+          "title": "Command",
+          "type": "string"
+        }
+      },
+      "required": [
+        "address",
+        "key_file",
+        "known_hosts_file"
+      ],
+      "title": "HostConfig",
+      "type": "object"
+    },
+    "Link": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "url"
+      ],
+      "title": "Link",
+      "type": "object"
+    },
+    "LlmConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "description": "llama.cpp's server, for /health, /props and /slots",
+          "title": "Url",
+          "type": "string"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/LlmModel"
+          },
+          "title": "Models",
+          "type": "array"
+        },
+        "timeout_seconds": {
+          "default": 5,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "pause_hermes_checks": {
+          "default": false,
+          "description": "Pause the client's checks (llm-ctl hermes-checks) around LLM actions",
+          "title": "Pause Hermes Checks",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "LlmConfig",
+      "type": "object"
+    },
+    "LlmModel": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The model's name in llm-ctl's config",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "match": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text in /props model_alias or model_path that identifies it",
+          "title": "Match"
+        }
+      },
+      "required": [
+        "name",
+        "label"
+      ],
+      "title": "LlmModel",
+      "type": "object"
+    },
+    "Matcher": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        },
+        "is_regex": {
+          "default": false,
+          "title": "Is Regex",
+          "type": "boolean"
+        },
+        "is_equal": {
+          "default": true,
+          "title": "Is Equal",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "Matcher",
+      "type": "object"
+    },
+    "PrometheusConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 10,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "gpus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpuQueries"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "decode_tokens_per_second": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A query for decode speed",
+          "title": "Decode Tokens Per Second"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "PrometheusConfig",
+      "type": "object"
+    },
+    "PrometheusPower": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "prometheus",
+          "title": "Source",
+          "type": "string"
+        },
+        "query": {
+          "description": "The host's power in watts; no data means it is off",
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "query"
+      ],
+      "title": "PrometheusPower",
+      "type": "object"
+    },
+    "PrometheusPrice": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "prometheus",
+          "title": "Source",
+          "type": "string"
+        },
+        "query": {
+          "description": "The price per kWh now",
+          "title": "Query",
+          "type": "string"
+        },
+        "period_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "period",
+          "description": "Label naming the tariff period",
+          "title": "Period Label"
+        },
+        "currency": {
+          "default": "USD",
+          "title": "Currency",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "query"
+      ],
+      "title": "PrometheusPrice",
+      "type": "object"
+    },
+    "ProtectedWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "days": {
+          "items": {
+            "enum": [
+              "mon",
+              "tue",
+              "wed",
+              "thu",
+              "fri",
+              "sat",
+              "sun"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Days",
+          "type": "array"
+        },
+        "from": {
+          "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "From",
+          "type": "string"
+        },
+        "to": {
+          "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "To",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "days",
+        "from",
+        "to",
+        "reason"
+      ],
+      "title": "ProtectedWindow",
+      "type": "object"
+    },
+    "SecretRef": {
+      "additionalProperties": false,
+      "description": "A secret's source: exactly one of an environment variable or a file.",
+      "properties": {
+        "env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Name of an environment variable holding it",
+          "title": "Env"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Path of a file holding it (trailing newline ignored)",
+          "title": "File"
+        }
+      },
+      "title": "SecretRef",
+      "type": "object"
+    },
+    "SiteInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The GPU host's name. Typed to confirm power and emergency actions.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "timezone": {
+          "default": "UTC",
+          "description": "IANA time zone for schedules, tariffs and the page",
+          "title": "Timezone",
+          "type": "string"
+        },
+        "links": {
+          "description": "Links shown in the header",
+          "items": {
+            "$ref": "#/$defs/Link"
+          },
+          "title": "Links",
+          "type": "array"
+        },
+        "emergency_warning": {
+          "default": "This cuts power like pulling the plug: everything on the host dies without shutting down. Use it only for a host that no longer answers, or a shutdown that is stuck.",
+          "description": "Shown above the emergency actions; describe your hardware's risks here",
+          "title": "Emergency Warning",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "SiteInfo",
+      "type": "object"
+    },
+    "StaticPower": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "static",
+          "title": "Source",
+          "type": "string"
+        },
+        "watts": {
+          "description": "The host's power while on",
+          "exclusiveMinimum": 0,
+          "title": "Watts",
+          "type": "number"
+        }
+      },
+      "required": [
+        "source",
+        "watts"
+      ],
+      "title": "StaticPower",
+      "type": "object"
+    },
+    "StaticPrice": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "static",
+          "title": "Source",
+          "type": "string"
+        },
+        "tariff": {
+          "$ref": "#/$defs/Tariff"
+        }
+      },
+      "required": [
+        "source",
+        "tariff"
+      ],
+      "title": "StaticPrice",
+      "type": "object"
+    },
+    "Tariff": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "default": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "periods": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "number"
+          },
+          "description": "Price per kWh of each period",
+          "minProperties": 1,
+          "title": "Periods",
+          "type": "object"
+        },
+        "default": {
+          "type": "string",
+          "description": "The period outside every window",
+          "title": "Default"
+        },
+        "windows": {
+          "description": "The first window that matches wins",
+          "items": {
+            "$ref": "#/$defs/TariffWindow"
+          },
+          "title": "Windows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "periods",
+        "default"
+      ],
+      "title": "Tariff",
+      "type": "object"
+    },
+    "TariffWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "days": {
+          "items": {
+            "enum": [
+              "mon",
+              "tue",
+              "wed",
+              "thu",
+              "fri",
+              "sat",
+              "sun"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Days",
+          "type": "array"
+        },
+        "from": {
+          "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "From",
+          "type": "string"
+        },
+        "to": {
+          "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "To",
+          "type": "string"
+        },
+        "period": {
+          "title": "Period",
+          "type": "string"
+        },
+        "months": {
+          "anyOf": [
+            {
+              "items": {
+                "maximum": 12,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Months the window applies in (seasons); all when not given",
+          "title": "Months"
+        }
+      },
+      "required": [
+        "days",
+        "from",
+        "to",
+        "period"
+      ],
+      "title": "TariffWindow",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The site config: git-owned, read-only to the app.",
+  "properties": {
+    "site": {
+      "$ref": "#/$defs/SiteInfo"
+    },
+    "auth": {
+      "$ref": "#/$defs/AuthConfig"
+    },
+    "bmc": {
+      "$ref": "#/$defs/BmcConfig"
+    },
+    "host": {
+      "$ref": "#/$defs/HostConfig"
+    },
+    "llm": {
+      "$ref": "#/$defs/LlmConfig"
+    },
+    "prometheus": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrometheusConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "alertmanager": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AlertmanagerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "actions": {
+      "$ref": "#/$defs/ActionsConfig"
+    },
+    "cost": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CostConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "protected_windows": {
+      "description": "No scheduled or manual stop inside these (backups)",
+      "items": {
+        "$ref": "#/$defs/ProtectedWindow"
+      },
+      "title": "Protected Windows",
+      "type": "array"
+    }
+  },
+  "required": [
+    "site",
+    "auth",
+    "bmc",
+    "host",
+    "llm"
+  ],
+  "title": "SiteConfig",
+  "type": "object"
+}
