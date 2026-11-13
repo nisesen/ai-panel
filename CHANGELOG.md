@@ -21,6 +21,8 @@ the panel does.
 - Shut down and reboot open their typed confirmation in place (native `<details>`, no script),
   so the page no longer carries two open forms. When the host is off, Power on is the one
   primary button and the rest say why they wait.
+- While an action runs, the state says Starting, Shutting down or loading in amber, instead of
+  a red "not answering" or "not healthy" during a normal boot.
 - Phones: the navigation fits a 375 px screen without scrolling; rows stack their buttons
   under the text.
 
