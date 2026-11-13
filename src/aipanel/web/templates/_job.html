@@ -1,15 +1,16 @@
-<section id="job" class="card job" hx-get="/fragments/job" hx-trigger="every {{ 2 if running else settings.display.refresh_seconds }}s" hx-swap="outerHTML">
-  {% if job %}
-  <h2>{{ job.label }}
-    <span class="pill {{ 'run' if job.running else ('ok' if job.status == 'succeeded' else 'bad') }}">{{ job.status | replace("_", " ") }}</span>
-    {% if job.dry_run %}<span class="pill warn">dry-run</span>{% endif %}
+{% if job %}
+<section id="job" class="job" hx-get="/fragments/job" hx-trigger="every {{ 2 if running else settings.display.refresh_seconds }}s" hx-swap="outerHTML" aria-live="polite">
+  <h2>
+    <span class="pill {{ 'run' if job.running else ('ok' if job.status == 'succeeded' else 'bad') }}"></span>
+    {{ job.label }}
+    <span class="muted">{{ job.status | replace("_", " ") }}{% if job.dry_run %}, dry-run{% endif %} · {{ job.actor }}, {{ local(job.started_at) }}{% if job.params %} · {% for k, v in job.params.items() %}{{ k }} {{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</span>
   </h2>
-  <p class="muted">by {{ job.actor }}, {{ local(job.started_at) }}{% if job.params %} · {% for k, v in job.params.items() %}{{ k }}={{ v }} {% endfor %}{% endif %}</p>
   <ol class="steps">
-    {% for step in job.steps %}<li><time>{{ local(step.at, "%H:%M:%S") }}</time> {{ step.message }}</li>{% endfor %}
+    {% for step in job.steps %}<li><time>{{ local(step.at, "%H:%M:%S") }}</time>{{ step.message }}</li>{% endfor %}
   </ol>
-  {% else %}
-  <h2>Actions</h2>
-  <p class="muted">Nothing has run since the panel started.</p>
-  {% endif %}
 </section>
+{% else %}
+<section id="job" class="job idle" hx-get="/fragments/job" hx-trigger="every {{ settings.display.refresh_seconds }}s" hx-swap="outerHTML" aria-live="polite">
+  No actions since the panel started.
+</section>
+{% endif %}

@@ -4,120 +4,123 @@
   <input name="confirm" autocomplete="off" autocapitalize="off" spellcheck="false" required pattern="{{ site.site.name | replace('.', '\\.') }}" aria-label="{{ label }}: type {{ site.site.name }}">
 </label>
 {%- endmacro %}
-<section class="actions">
+{% macro row(title, text) -%}
+<span class="act-text"><strong>{{ title }}</strong><span>{{ text }}</span></span>
+{%- endmacro %}
+<section class="controls">
   {% if groups.power %}
-  <article class="card">
+  <div class="card">
     <h2>Power</h2>
     {% for a in groups.power %}
       {% if a.name == "power_on" %}
-      <form method="post" action="/actions/power_on">
+      <form method="post" action="/actions/power_on" class="act act-row">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button {% if snap.power != "off" %}disabled{% endif %}>Power on</button>
-        <span class="hint">BMC on, then waits until the LLM is healthy.</span>
+        {{ row("Power on", "BMC on, then waits until the LLM is healthy.") }}
+        <button class="{{ 'primary' if snap.power == 'off' else '' }}" {% if snap.power != "off" %}disabled{% endif %}>Power on</button>
       </form>
-      {% elif a.name == "shutdown" %}
-      <form method="post" action="/actions/shutdown" class="stack">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <p class="hint">{{ a.warning }}{% if snap.busy_reason() %} <b>Busy now: {{ snap.busy_reason() }}.</b>{% endif %}</p>
-        <label>Silence alerts
-          <select name="silence">
-            {% if next_on %}<option value="next_on">until the next scheduled on ({{ local(next_on) }})</option>{% endif %}
-            {% for m, text in [(30, "30 minutes"), (120, "2 hours"), (settings.silences.shutdown_minutes, (settings.silences.shutdown_minutes / 60) | round(1) ~ " hours (default)"), (1440, "1 day"), (0, "no silence")] %}
-            <option value="{{ m }}"{% if m == settings.silences.shutdown_minutes and not next_on %} selected{% endif %}>{{ text }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        {{ typed("Shut down") }}
-        <button class="danger" {% if not up %}disabled{% endif %}>Shut down</button>
-      </form>
-      {% elif a.name == "reboot" %}
-      <form method="post" action="/actions/reboot" class="stack">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <p class="hint">{{ a.warning }}</p>
-        {{ typed("Reboot") }}
-        <button class="danger" {% if not up %}disabled{% endif %}>Reboot</button>
-      </form>
+      {% elif a.name in ("shutdown", "reboot") %}
+      {% set title = "Shut down" if a.name == "shutdown" else "Reboot" %}
+      {% if up %}
+      <details class="act">
+        <summary>{{ row(title, a.warning) }}<span class="btn{{ ' danger-quiet' if a.name == 'shutdown' else '' }}">{{ title }}…</span></summary>
+        <form method="post" action="/actions/{{ a.name }}" class="confirm">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          {% if a.name == "shutdown" %}
+          {% if snap.busy_reason() %}<p class="warning">Busy now: {{ snap.busy_reason() }}.</p>{% endif %}
+          <label>Silence alerts
+            <select name="silence">
+              {% if next_on %}<option value="next_on">until the next scheduled on ({{ local(next_on) }})</option>{% endif %}
+              {% for m, text in [(30, "30 minutes"), (120, "2 hours"), (settings.silences.shutdown_minutes, (settings.silences.shutdown_minutes / 60) | round(1) ~ " hours (default)"), (1440, "1 day"), (0, "no silence")] %}
+              <option value="{{ m }}"{% if m == settings.silences.shutdown_minutes and not next_on %} selected{% endif %}>{{ text }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          {% endif %}
+          {{ typed(title) }}
+          <div class="row"><button class="danger">{{ title }}</button></div>
+        </form>
+      </details>
+      {% else %}
+      <div class="act act-row">
+        {{ row(title, "Needs the host to answer.") }}
+        <button disabled>{{ title }}</button>
+      </div>
+      {% endif %}
       {% endif %}
     {% endfor %}
-  </article>
+  </div>
   {% endif %}
 
-  {% if groups.llm %}
-  <article class="card">
-    <h2>LLM</h2>
-    {% for a in groups.llm %}
-      <form method="post" action="/actions/{{ a.name }}" class="row"{% if a.confirm == "confirm" %} hx-confirm="{{ a.label }}? {{ a.warning }}"{% endif %}>
+  <div>
+    {% if groups.llm %}
+    <div class="card">
+      <h2>LLM</h2>
+      {% for a in groups.llm if a.name == "llm_switch" %}
+      <form method="post" action="/actions/llm_switch" class="act act-row"{% if a.confirm == "confirm" %} hx-confirm="{{ a.label }}? {{ a.warning }}"{% endif %}>
         <input type="hidden" name="csrf" value="{{ csrf }}">
         {% if a.confirm == "confirm" %}<input type="hidden" name="confirm" value="yes">{% endif %}
-        {% if a.name == "llm_switch" %}
         <select name="model" aria-label="Model">
           {% for m in site.llm.models %}<option value="{{ m.name }}"{% if m.name == snap.llm.model %} selected{% endif %}>{{ m.label }}</option>{% endfor %}
         </select>
-        {% endif %}
         <button {% if not up %}disabled{% endif %}>{{ a.label }}</button>
       </form>
-    {% endfor %}
-  </article>
-  {% endif %}
-
-  {% if groups.guests and site.host.guests %}
-  <article class="card">
-    <h2>Guests</h2>
-    <table class="compact">
-      <tbody>
-      {% for g in site.host.guests %}
-        <tr><td>{{ g.id }} {{ g.name }}</td><td class="buttons">
-          {% for a in groups.guests %}
-          <form method="post" action="/actions/{{ a.name }}" class="inline" hx-confirm="{{ a.label }} guest {{ g.id }} ({{ g.name }})?">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <input type="hidden" name="guest" value="{{ g.id }}">
-            <input type="hidden" name="confirm" value="yes">
-            <button class="small" {% if not up %}disabled{% endif %}>{{ a.label }}</button>
-          </form>
-          {% endfor %}
-        </td></tr>
       {% endfor %}
-      </tbody>
-    </table>
-  </article>
-  {% endif %}
-
-  {% if groups.maintenance %}
-  <article class="card">
-    <h2>Maintenance</h2>
-    {% for a in groups.maintenance %}
-      {% if a.name == "probe" %}
-      <form method="post" action="/actions/probe" class="row">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button {% if not up %}disabled{% endif %}>Probe</button><span class="hint">read-only health check on the host</span>
-      </form>
-      {% elif a.name == "client_checks" %}
-      <div class="row">
-        {% for op in ["pause", "resume"] %}
-        <form method="post" action="/actions/client_checks" class="inline">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <input type="hidden" name="op" value="{{ op }}">
-          <button {% if not up %}disabled{% endif %}>{{ op | capitalize }} client checks</button>
-        </form>
+      <div class="act act-row">
+        <span class="act-text"><span>The model server in its guest</span></span>
+        <span class="buttons">
+        {% for a in groups.llm if a.name != "llm_switch" %}
+          <form method="post" action="/actions/{{ a.name }}" class="inline"{% if a.confirm == "confirm" %} hx-confirm="{{ a.label }}? {{ a.warning }}"{% endif %}>
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            {% if a.confirm == "confirm" %}<input type="hidden" name="confirm" value="yes">{% endif %}
+            <button {% if not up %}disabled{% endif %}>{{ a.label | replace(" LLM", "") }}</button>
+          </form>
         {% endfor %}
+        </span>
       </div>
-      {% endif %}
-    {% endfor %}
-  </article>
-  {% endif %}
+    </div>
+    {% endif %}
 
-  {% if groups.emergency %}
-  {% set stuck = last_failed in ("shutdown", "reboot") %}
-  <details class="card emergency"{% if (snap.power == "on" and not up) or stuck %} open{% endif %}>
-    <summary><h2>Emergency</h2> <span class="hint">BMC commands for a host that no longer answers, or a stuck shutdown</span></summary>
-    <p class="warning">{{ site.site.emergency_warning }}</p>
-    {% for a in groups.emergency %}
-    <form method="post" action="/actions/{{ a.name }}" class="stack">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      {{ typed(a.label) }}
-      <button class="danger">{{ a.label }}</button>
-    </form>
-    {% endfor %}
-  </details>
-  {% endif %}
+    {% if groups.maintenance %}
+    <div class="card">
+      <h2>Maintenance</h2>
+      {% for a in groups.maintenance %}
+        {% if a.name == "probe" %}
+        <form method="post" action="/actions/probe" class="act act-row">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          {{ row("Probe", "Read-only health check on the host.") }}
+          <button {% if not up %}disabled{% endif %}>Probe</button>
+        </form>
+        {% elif a.name == "client_checks" %}
+        <div class="act act-row">
+          {{ row("Client checks", "The LLM's clients' own health checks.") }}
+          <span class="buttons">
+          {% for op in ["pause", "resume"] %}
+            <form method="post" action="/actions/client_checks" class="inline">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="op" value="{{ op }}">
+              <button {% if not up %}disabled{% endif %}>{{ op | capitalize }}</button>
+            </form>
+          {% endfor %}
+          </span>
+        </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
 </section>
+
+{% if groups.emergency %}
+{% set stuck = last_failed in ("shutdown", "reboot") %}
+<details class="card emergency"{% if (snap.power == "on" and not up) or stuck %} open{% endif %}>
+  <summary><h2>Emergency</h2><span class="hint">BMC commands for a host that no longer answers, or a stuck shutdown</span></summary>
+  <p class="warning">{{ site.site.emergency_warning }}</p>
+  {% for a in groups.emergency %}
+  <form method="post" action="/actions/{{ a.name }}" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {{ typed(a.label) }}
+    <div class="row"><button class="danger">{{ a.label }}</button></div>
+  </form>
+  {% endfor %}
+</details>
+{% endif %}
