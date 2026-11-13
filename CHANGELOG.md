@@ -6,6 +6,11 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-12
+
+A calmer, clearer interface for desktop and phone. No change to the config, the settings or what
+the panel does.
+
 ### Changed
 
 - A calmer interface: sections separated by hairlines instead of boxes, status as a dot and a
