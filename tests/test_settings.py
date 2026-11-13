@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import site_config
 
+from aipanel import files
 from aipanel.audit import Audit
 from aipanel.cli import main
 from aipanel.config.settings import Settings
@@ -31,6 +32,7 @@ def test_update_saves_atomically_and_audits(store: SettingsStore, tmp_path: Path
     store.update({"schedule.enabled": True, "poll": {"interval_seconds": 20}}, "alice")
     saved = json.loads(store.path.read_text())
     assert saved["schedule"]["enabled"] is True and saved["poll"]["interval_seconds"] == 20
+    files.flush()  # the audit line is appended on the writer thread
     assert sorted(os.listdir(tmp_path)) == ["audit.jsonl", "settings.json", "settings.lock"]
     entry = store.audit.read(1)[0]
     assert entry["event"] == "settings.changed" and entry["actor"] == "alice"
