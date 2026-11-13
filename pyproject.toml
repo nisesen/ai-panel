@@ -1,6 +1,6 @@
 [project]
 name = "ai-panel"
-version = "0.1.1"
+version = "0.1.2"
 description = "A small web control panel for a self-hosted GPU/LLM server: power on and off via IPMI, graceful shutdown, model switching, schedules and running cost."
 readme = "README.md"
 license = "MIT"
