@@ -1,11 +1,15 @@
 {% set host = snap.host %}
 {% set up = host is not none %}
 {% set model = site.model(snap.llm.model) if snap.llm.model else None %}
+{% set loading = running and job.action in ("power_on", "reboot", "llm_switch", "llm_restart", "llm_start") %}
 <section id="status" class="status" hx-get="/fragments/status" hx-trigger="every {{ settings.display.refresh_seconds }}s" hx-swap="outerHTML">
   <div class="hero">
     <div>
       <p class="state">
-        {% if snap.power == "on" and up %}<span class="dot ok"></span>On
+        {% set moving = job.action if running and job.action in ("power_on", "reboot", "shutdown") else None %}
+        {% if moving == "shutdown" and snap.power == "on" and not up %}<span class="dot run"></span>Shutting down
+        {% elif snap.power == "on" and up %}<span class="dot ok"></span>On
+        {% elif moving and snap.power == "on" %}<span class="dot run"></span>Starting <span class="muted">· waiting for the host</span>
         {% elif snap.power == "on" %}<span class="dot bad"></span>On <span class="muted">· not answering</span>
         {% elif snap.power == "off" %}<span class="dot"></span>Off
         {% else %}<span class="dot warn"></span>Power unknown{% endif %}
@@ -32,7 +36,7 @@
 
   <dl class="readouts">
     <div><dt>Power</dt><dd>{{ cost_now.watts | number(0, "W") }}{% if cost_now.estimated %}<small>standby</small>{% endif %}</dd></div>
-    <div><dt>Cost</dt><dd>{{ cost_now.per_hour | money(snap.energy.currency, 3) }}/h<small>{{ cost_now.per_day | money(snap.energy.currency) }} a day</small></dd></div>
+    <div><dt>Cost</dt><dd>{% if cost_now.per_hour is not none %}{{ cost_now.per_hour | money(snap.energy.currency, 3) }}/h<small>{{ cost_now.per_day | money(snap.energy.currency) }} a day</small>{% else %}–{% endif %}</dd></div>
     <div><dt>Price</dt><dd>{% if cost_now.price %}{{ cost_now.price.price | money(snap.energy.currency, 3) }}<small>per kWh{% if cost_now.price.period %}, {{ cost_now.price.period }}{% endif %}</small>{% else %}–{% endif %}</dd></div>
     <div><dt>Decode</dt><dd>{{ snap.llm.decode_tps | number(1, "tok/s") }}</dd></div>
     <div><dt>Slots busy</dt><dd>{% if snap.llm.slots %}{{ snap.llm.busy }} of {{ snap.llm.slots }}{% else %}–{% endif %}</dd></div>
@@ -43,8 +47,8 @@
     <div class="card">
       <h2>Model</h2>
       <p class="model">
-        {% if model or snap.llm.alias %}{{ model.label if model else snap.llm.alias }}{% elif snap.power == "off" %}<span class="muted">Not running while the host is off</span>{% else %}<span class="muted">No model reported</span>{% endif %}
-        {% if snap.llm.healthy %}<span class="pill ok">healthy</span>{% elif snap.llm.healthy == false %}<span class="pill bad">not healthy</span>{% endif %}
+        {% if model or snap.llm.alias %}{{ model.label if model else snap.llm.alias }}{% elif snap.power == "off" %}<span class="muted">Not running while the host is off</span>{% elif loading %}{% else %}<span class="muted">No model reported</span>{% endif %}
+        {% if snap.llm.healthy %}<span class="pill ok">healthy</span>{% elif loading %}<span class="pill run">loading</span>{% elif snap.llm.healthy == false %}<span class="pill bad">not healthy</span>{% endif %}
       </p>
       {% if snap.llm.path %}<p class="hint wrap">{{ snap.llm.path }}</p>{% endif %}
     </div>
