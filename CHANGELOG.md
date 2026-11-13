@@ -6,6 +6,19 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A calmer interface: sections separated by hairlines instead of boxes, status as a dot and a
+  word instead of coloured pills, one quiet button style with a primary and a danger variant, and
+  tabular numbers. The dashboard leads with the machine's state and the next scheduled event,
+  then the readings (power, cost, price, decode, slots, silences), the model, the GPUs with a
+  memory bar, and the guests with their buttons in one list.
+- Shut down and reboot open their typed confirmation in place (native `<details>`, no script),
+  so the page no longer carries two open forms. When the host is off, Power on is the one
+  primary button and the rest say why they wait.
+- Phones: the navigation fits a 375 px screen without scrolling; rows stack their buttons
+  under the text.
+
 ### Fixed
 
 - The release's smoke test runs one platform at a time (Docker refused the second one under the
